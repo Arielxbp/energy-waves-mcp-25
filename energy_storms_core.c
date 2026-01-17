@@ -28,17 +28,8 @@ static void update( float *layer, int layer_size, int k, int pos, float energy )
 }
 
 
-void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions) {
+void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions, float* layer, float* layer_copy) {
     int i, j, k;
-    /* 3. Allocate memory for the layer and initialize to zero */
-    float *layer = (float *)malloc( sizeof(float) * layer_size );
-    float *layer_copy = (float *)malloc( sizeof(float) * layer_size );
-    if ( layer == NULL || layer_copy == NULL ) {
-        fprintf(stderr,"Error: Allocating the layer memory\n");
-        exit( EXIT_FAILURE );
-    }
-    for( k=0; k<layer_size; k++ ) layer[k] = 0.0f;
-    for( k=0; k<layer_size; k++ ) layer_copy[k] = 0.0f;
     
     /* 4. Storms simulation */
     for( i=0; i<num_storms; i++) {

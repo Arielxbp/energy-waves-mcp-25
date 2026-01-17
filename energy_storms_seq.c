@@ -23,7 +23,7 @@
 #include <sys/time.h>
 #include "energy_storms.h"
 
-void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions);
+void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions, float* layer, float* layer_copy);
 
 /*
  * MAIN PROGRAM
@@ -55,9 +55,20 @@ int main(int argc, char *argv[]) {
 
     /* 2. Begin time measurement */
     double ttotal = cp_Wtime();
+    int k;
 
+    /* 3. Allocate memory for the layer and initialize to zero */
+    float *layer = (float *)malloc( sizeof(float) * layer_size );
+    float *layer_copy = (float *)malloc( sizeof(float) * layer_size );
+    if ( layer == NULL || layer_copy == NULL ) {
+        fprintf(stderr,"Error: Allocating the layer memory\n");
+        exit( EXIT_FAILURE );
+    }
+    for( k=0; k<layer_size; k++ ) layer[k] = 0.0f;
+    for( k=0; k<layer_size; k++ ) layer_copy[k] = 0.0f;
+    
     /* START: Do NOT optimize/parallelize the code of the main program above this point */
-    core(layer_size, num_storms, storms, maximum, positions);
+    core(layer_size, num_storms, storms, maximum, positions, layer, layer_copy);
     /* END: Do NOT optimize/parallelize the code below this point */
 
     /* 5. End time measurement */
@@ -78,6 +89,8 @@ int main(int argc, char *argv[]) {
         printf(" %d %f", positions[i], maximum[i] );
     printf("\n");
 
+    free(layer);
+    free(layer_copy);
     /* 8. Free resources */    
     for( i=0; i<argc-2; i++ )
         free( storms[i].posval );
@@ -85,4 +98,3 @@ int main(int argc, char *argv[]) {
     /* 9. Program ended successfully */
     return 0;
 }
-

@@ -94,6 +94,6 @@ int main(int argc, char *argv[]) {
         free( storms[i].posval );
     free(storms);
     /* 9. Program ended successfully */
+	MPI_Finalize();
     return 0;
 }
-
