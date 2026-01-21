@@ -1,0 +1,48 @@
+// filepath: /home/arielxbp/dev/multicore/exam-waves-mcp-25/.vscode/launch.json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "CUDA C++: Launch",
+      "type": "cuda-gdb",
+      "request": "launch",
+      "program": "${workspaceFolder}/energy_storms_cuda",
+      "args": [
+        "35", "test_files/test_01_a35_p5_w3" // <-- replace with your arguments
+      ],
+      "stopAtEntry": true,
+      "cwd": "${workspaceFolder}",
+      "environment": []
+    }, 
+
+    {
+      "name": "Debug energy_storms_seq",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/energy_storms_seq",
+      "args": [
+        "35", "test_files/test_01_a35_p5_w3" // <-- replace with your arguments
+      ],
+      "stopAtEntry": true,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb"
+    },
+    {
+      "name": "Debug energy_storms_cuda",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/energy_storms_cuda",
+      "args": [
+        "35", "test_files/test_01_a35_p5_w3" // <-- replace with your arguments
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "/opt/cuda/bin/cuda-gdb"
+    }
+  ]
+}
