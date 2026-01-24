@@ -78,8 +78,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int i, k;
 
     /* 3.1. Obtain grid and block dimensions */
-    dim3 blockDim(4, 1, 1); // 4 threads per block
-    dim3 gridDim((layer_size + blockDim.x - 1) / blockDim.x, 1, 1);
+    dim3 blockDim(256, 1, 1); // 256 threads per block
+    dim3 gridDim((layer_size + blockDim.x - 1) / blockDim.x, 1, 1); // -1 to round the blocks needed
 
     /* 3.2. Allocate memory for the layer and initialize to zero */
     float *layer = (float *) malloc( sizeof(float) * layer_size );
