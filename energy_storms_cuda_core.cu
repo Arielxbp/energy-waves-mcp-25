@@ -35,34 +35,33 @@ __global__ void bomb(float* layer_d, int layer_size, int* posval_d, int storm_si
     // Each thread processes multiple contact points of the layer in a grid-stride loop
     for (int i = thread_id; i < layer_size; i += grid_stride) {
 
-        // For each contact point i, compute all storm impacts and   the contact point value if affected by it
+        // Variable that holds all particle energy impacts
+        float sum_energy = 0.0f;
+
+        // For each contact point i, compute all storm impacts and update the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
             energy = (float)posval_d[j*2+1] * 1000;
             contact_position = posval_d[j*2];
             // Maybe I can modify it so that only if affected then do the update
             // Or save all storm impacts before and update after all calculations (Not sure if better)
-            layer_d[i] += update(i, layer_size, energy, contact_position);
+            sum_energy += update(i, layer_size, energy, contact_position);
         }
+
+        // After computing all impacts that affect contact point i, update his value
+        layer_d[i] += sum_energy;
+
     }
 }
 
-__global__ void relax(float* layer_d, float* layer_copy_d, int layer_size) {
+__global__ void relax(float* layer_d, const float* layer_copy_d, int layer_size) {
 
     // Grid-stride loop for handling layers > threads
     int grid_stride = blockDim.x * gridDim.x;
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    float left, center, right;
 
     // Each thread processes multiple contact points of the layer in a grid-stride loop
-    for (int i = thread_id; i < layer_size; i += grid_stride) {
-
-        // Skip the first and last positions
-        if (i > 0 && i < layer_size - 1) {
-            left = layer_copy_d[i - 1];
-            center = layer_copy_d[i];
-            right = layer_copy_d[i + 1];
-            layer_d[i] = (left + center + right) / 3.0f;
-        }
+    for (int i = thread_id; i < layer_size - 1; i += grid_stride) {
+        layer_d[i] = (layer_copy_d[i-1] + layer_copy_d[i] + layer_copy_d[i+1]) / 3.0f;
     }
 }
 
@@ -71,7 +70,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int i, k;
 
     /* 3.1. Obtain grid and block dimensions */
-    dim3 blockDim(256, 1, 1); // 256 threads per block
+    dim3 blockDim(32, 1, 1); // 32 threads per block
     dim3 gridDim((layer_size + blockDim.x - 1) / blockDim.x, 1, 1); // -1 to round the blocks needed
 
     /* 3.2. Allocate memory for the layer and initialize to zero */
