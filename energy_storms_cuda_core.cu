@@ -9,26 +9,19 @@ __device__ float update( int affected_position, int layer_size, float energy, in
 
     /* 1. Compute the absolute value of the distance between the
         impact position and the k-th position of the layer */
-    int distance = contact_position - affected_position;
+    int distance = abs(contact_position - affected_position) + 1;
 
-    if ( distance < 0 ) distance = - distance;
-
-    /* 2. Impact cell has a distance value of 1 */
-    distance = distance + 1;
-
-    /* 3. Square root of the distance */
+    /* 2. Square root of the distance */
     /* NOTE: Real world atenuation typically depends on the square of the distance.
        We use here a tailored equation that affects a much wider range of cells */
     float atenuacion = sqrtf( (float)distance );
 
-    /* 4. Compute attenuated energy */
+    /* 3. Compute attenuated energy */
     float energy_k = energy / layer_size / atenuacion;
 
-    /* 5. Do not add if its absolute value is lower than the threshold */
-    if ( energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size ) {
-        return energy_k;
-    }
-    return 0.0f;
+    /* 4. Do not add if its absolute value is lower than the threshold */
+    float threshold = THRESHOLD / layer_size;
+    return (fabsf(energy_k) >= threshold) ? energy_k : 0.0f; // float abs()
 }
 
 __global__ void bomb(float* layer_d, int layer_size, int* posval_d, int storm_size) {
@@ -42,7 +35,7 @@ __global__ void bomb(float* layer_d, int layer_size, int* posval_d, int storm_si
     // Each thread processes multiple contact points of the layer in a grid-stride loop
     for (int i = thread_id; i < layer_size; i += grid_stride) {
 
-        // For each contact point i, compute all storm impacts and update the contact point value if affected by it
+        // For each contact point i, compute all storm impacts and   the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
             energy = (float)posval_d[j*2+1] * 1000;
             contact_position = posval_d[j*2];
