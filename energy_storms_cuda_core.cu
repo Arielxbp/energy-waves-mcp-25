@@ -35,8 +35,8 @@ __global__ void bomb(float* layer_d, int layer_size, int* posval_d, int storm_si
     // Each thread processes multiple contact points of the layer in a grid-stride loop
     for (int i = thread_id; i < layer_size; i += grid_stride) {
 
-        // Variable that holds all particle energy impacts
-        float sum_energy = 0.0f;
+        // // Variable that holds all particle energy impacts
+        // float sum_energy = 0.0f;
 
         // For each contact point i, compute all storm impacts and update the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
@@ -44,11 +44,12 @@ __global__ void bomb(float* layer_d, int layer_size, int* posval_d, int storm_si
             contact_position = posval_d[j*2];
             // Maybe I can modify it so that only if affected then do the update
             // Or save all storm impacts before and update after all calculations (Not sure if better)
-            sum_energy += update(i, layer_size, energy, contact_position);
+            // sum_energy += update(i, layer_size, energy, contact_position);
+            layer_d[i] += update(i, layer_size, energy, contact_position);
         }
 
         // After computing all impacts that affect contact point i, update his value
-        layer_d[i] += sum_energy;
+        // layer_d[i] += sum_energy;
 
     }
 }
