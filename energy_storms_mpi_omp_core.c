@@ -25,9 +25,8 @@ static float update(int layer_size, int k, int pos, float energy ) {
     float energy_k = energy / layer_size / atenuacion;
 
     /* 5. Do not add if its absolute value is lower than the threshold */
-    float rval = ( energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size ) ? energy_k : 0.0f;
+    return ( energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size ) ? energy_k : 0.0f;
     
-    return rval;
 }
 
 
@@ -35,11 +34,10 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int i, j, k, size, rank;
     /* 3. Allocate memory for the layer and initialize to zero */
     float *layer = (float *)malloc( sizeof(float) * layer_size );
-    float *layer_copy = (float *)malloc( sizeof(float) * layer_size );
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-
+    
     int int_chunk_size = layer_size / size;
     int rem = layer_size % size;
     int sizes[size];
@@ -61,14 +59,13 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     float *local_layer = (float *)malloc( sizeof(float) * (chunk_size) );
     float *local_layer_copy = (float *)malloc( sizeof(float) * (chunk_size) );
     
-    if ( layer == NULL || layer_copy == NULL ) {
+    if ( layer == NULL) {
         fprintf(stderr,"Error: Allocating the layer memory\n");
         exit( EXIT_FAILURE );
     }
 
     for( k=0; k<layer_size; k++ ) {        
         layer[k] = 0.0f;
-        layer_copy[k] = 0.0f;
         if (k < chunk_size) {
             local_layer[k] = 0.0f;
             local_layer_copy[k] = 0.0f;
@@ -85,12 +82,11 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     for( i=0; i<num_storms; i++) {
         /* 4.1. Add impacts energies to layer cells */
         /* For each particle */
-        #pragma omp parallel for schedule(static) collapse(2) private(j,k)
-        for( k=0; k<chunk_size; k++ ) {
-            for( j=0; j<storms[i].size; j++ ) {
+        for( j=0; j<storms[i].size; j++ ) {
+            for( k=0; k<chunk_size; k++ ) {
             /* For each cell in the layer */
                 /* Update the energy value for the cell */
-                local_layer[k] += update(layer_size, k+displs[rank], storms[i].posval[j*2], (float)storms[i].posval[j*2+1] * 1000 );
+                local_layer[k] += update(layer_size, k+displs[rank], storms[i].posval[j*2], (float)storms[i].posval[j*2+1] * 1000);
             }
         }
         /*
@@ -104,11 +100,11 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         /* 4.2. Energy relaxation between storms */
 
         /* 4.2.1. Copy current layer to ancillary array */
-        #pragma omp parallel for schedule(static) private(k)
+        #pragma omp parallel for schedule(static)
         for( k=0; k<chunk_size; k++ )
             local_layer_copy[k] = local_layer[k];
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        
         /* 4.2.2. Update layer using the ancillary values.
                   Skip updating the first and last positions */
         MPI_Status status;
@@ -133,7 +129,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
                 local_layer[chunk_size-1] = ( local_layer_copy[chunk_size-2] + local_layer_copy[chunk_size-1] + right ) / 3;
             }
         }
-        /*
+        /*(
         printf("Rank %d: Storm %d layer after exchange and border updates:\n", rank, i);
         printf("[");
         for (int i = 0; i < chunk_size-1; i++) {
@@ -141,8 +137,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
         printf("%f]\n", local_layer[chunk_size-1]);
 */
-        MPI_Barrier(MPI_COMM_WORLD);
-        #pragma omp parallel for schedule(static) private(k)
+        #pragma omp parallel for schedule(static)
         for( k=1; k<chunk_size-1; k++ )
             local_layer[k] = ( local_layer_copy[k-1] + local_layer_copy[k] + local_layer_copy[k+1] ) / 3;        
         
@@ -154,10 +149,10 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
         printf("%f]\n", local_layer[chunk_size-1]);
         MPI_Barrier(MPI_COMM_WORLD);*/
-        local_max.max = local_layer[0];
+
+	local_max.max = local_layer[0];
         local_max.pos = displs[rank];
         /* 4.3. Locate the maximum value in the layer, and its position */
-        //#pragma omp parallel for schedule(static) private(k)
         for( k=0; k<chunk_size; k++ ) {
             /* Check it only if it is a local maximum */
             if (local_layer[k] >= local_max.max) {
@@ -166,7 +161,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
             }
         }
         //printf("Rank %d: Storm %d before reduction local max %f at position %d\n", rank, i, max, pos);
-        MPI_Barrier(MPI_COMM_WORLD);
+        
 
         //printf("Rank %d: Storm %d local max %f at position %d\n", rank, i, max, pos);
         /* 4.4. Reduce to get the global maximum and its position */
