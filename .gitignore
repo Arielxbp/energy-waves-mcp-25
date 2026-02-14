@@ -2,3 +2,5 @@
 energy_storms_seq
 energy_storms_cuda_*
 energy_storms_cuda
+test_file.txt
+test_file_*
