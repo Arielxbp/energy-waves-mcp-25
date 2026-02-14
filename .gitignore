@@ -1,3 +1,4 @@
 *.o
 energy_storms_seq
 energy_storms_cuda_*
+energy_storms_cuda
