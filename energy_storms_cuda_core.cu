@@ -3,27 +3,32 @@
 #include <math.h>
 #include "energy_storms.h"
 
-#define THREAD_PER_BLOCK 256
-
 /* THIS FUNCTION CAN BE MODIFIED */
 /* Function to update a single position of the layer */
 __device__ float update( int affected_position, int layer_size, float energy, int contact_position ) {
 
     /* 1. Compute the absolute value of the distance between the
         impact position and the k-th position of the layer */
-    int distance = abs(contact_position - affected_position) + 1;
+    int distance = contact_position - affected_position;
 
-    /* 2. Square root of the distance */
+    if ( distance < 0 ) distance = - distance;
+
+    /* 2. Impact cell has a distance value of 1 */
+    distance = distance + 1;
+
+    /* 3. Square root of the distance */
     /* NOTE: Real world atenuation typically depends on the square of the distance.
        We use here a tailored equation that affects a much wider range of cells */
     float atenuacion = sqrtf( (float)distance );
 
-    /* 3. Compute attenuated energy */
+    /* 4. Compute attenuated energy */
     float energy_k = energy / layer_size / atenuacion;
 
-    /* 4. Do not add if its absolute value is lower than the threshold */
-    float threshold = THRESHOLD / layer_size;
-    return (fabsf(energy_k) >= threshold) ? energy_k : 0.0f; // float abs()
+    /* 5. Do not add if its absolute value is lower than the threshold */
+    if ( energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size ) {
+        return energy_k;
+    }
+    return 0.0f;
 }
 
 __global__ void bomb(float* layer_d, int layer_size, int* posval_d, int storm_size) {
@@ -43,45 +48,27 @@ __global__ void bomb(float* layer_d, int layer_size, int* posval_d, int storm_si
             contact_position = posval_d[j*2];
             // Maybe I can modify it so that only if affected then do the update
             // Or save all storm impacts before and update after all calculations (Not sure if better)
-            // sum_energy += update(i, layer_size, energy, contact_position);
             layer_d[i] += update(i, layer_size, energy, contact_position);
         }
-
     }
 }
 
-__global__ void relax(float* layer_d, int layer_size) {
+__global__ void relax(float* layer_d, float* layer_copy_d, int layer_size) {
 
     // Grid-stride loop for handling layers > threads
     int grid_stride = blockDim.x * gridDim.x;
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // Use a shared memory to contain THREAD_PER_BLOCK values of the layer_d.
-    // So each thread of the block will read once from global memory and then use the shared memory. 
-    // Add 2 to accurately compute if the thread is in the middle of the layer but border of his block,
-    // he still needs to read the value of the next position of the layer, which is in the next block, so it needs to be in the shared memory.
-    __shared__ float shared_layer[THREAD_PER_BLOCK+2];
+    float left, center, right;
 
     // Each thread processes multiple contact points of the layer in a grid-stride loop
-    for (int i = thread_id; i < layer_size - 1; i += grid_stride) {
+    for (int i = thread_id; i < layer_size; i += grid_stride) {
 
-        // Offset all by 1 to the right
-        shared_layer[threadIdx.x + 1] = layer_d[i];
-        
-        // If the thread is the first
-        if (threadIdx.x == 0) {
-            // For the first cell
-            shared_layer[threadIdx.x] = layer_d[i-1];
-            // For the last cell
-            shared_layer[threadIdx.x + THREAD_PER_BLOCK + 1] = layer_d[i+THREAD_PER_BLOCK];
-        }
-
-        // Wait
-        __syncthreads();
-
-        // Update
-        if (i != 0 && i != layer_size - 1){
-            layer_d[i] = (shared_layer[threadIdx.x] + shared_layer[threadIdx.x+1] + shared_layer[threadIdx.x+2]) / 3.0f;
+        // Skip the first and last positions
+        if (i > 0 && i < layer_size - 1) {
+            left = layer_copy_d[i - 1];
+            center = layer_copy_d[i];
+            right = layer_copy_d[i + 1];
+            layer_d[i] = (left + center + right) / 3.0f;
         }
     }
 }
@@ -91,8 +78,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int i, k;
 
     /* 3.1. Obtain grid and block dimensions */
-    dim3 blockDim(THREAD_PER_BLOCK, 1, 1); // 256 threads per block
-    dim3 gridDim((layer_size + blockDim.x - 1) / blockDim.x, 1, 1); // -1 to round the blocks needed
+    dim3 blockDim(256, 1, 1); // 256 threads per block
+    dim3 gridDim((layer_size + blockDim.x - 1) / blockDim.x, 1, 1);
 
     /* 3.2. Allocate memory for the layer and initialize to zero */
     float *layer = (float *) malloc( sizeof(float) * layer_size );
@@ -105,25 +92,27 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     cudaMalloc((void **)&layer_d, sizeof(float) * layer_size);
     cudaMemcpy(layer_d, layer, sizeof(float) * layer_size, cudaMemcpyHostToDevice);
 
-    /* 3.3 Allocate memory for the posval and initialize to zero*/
-    int *posval_d;
-    
     /* 4 Simulate for every storm */
-    for (i=0; i<num_storms; i++) {
+    for ( i=0; i<num_storms; i++ ) {
 
-        /* 4.1. Copy posval to device */
+        /* 4.1. Allocate memory for the posval and initialize to zero*/
+        int *posval_d;
         cudaMalloc((void **)&posval_d, sizeof(int) * storms[i].size * 2);
         cudaMemcpy(posval_d, storms[i].posval, sizeof(int) * storms[i].size * 2, cudaMemcpyHostToDevice);
 
         /* 4.2. Simulate impacts energy to layer cells */
         bomb<<<gridDim, blockDim>>>(layer_d, layer_size, posval_d, storms[i].size);
 
-        /* 4.3. Simulate energy relaxation */
-        relax<<<gridDim, blockDim>>>(layer_d, layer_size);
+        /* 4.3. Allocate memory for the layer_copy */
+        float *layer_copy_d;
+        cudaMalloc((void **)&layer_copy_d, sizeof(float) * layer_size);
+        cudaMemcpy(layer_copy_d, layer_d, sizeof(float) * layer_size, cudaMemcpyDeviceToDevice);
+
+        /* 4.4. Simulate energy relaxation */
+        relax<<<gridDim, blockDim>>>(layer_d, layer_copy_d, layer_size);
 
         /* 4.5 Find maximum energy and its position */
         cudaMemcpy(layer, layer_d, sizeof(float) * layer_size, cudaMemcpyDeviceToHost);
-
         for( k=1; k<layer_size-1; k++ ) {
             /* Check it only if it is a local maximum */
             if ( layer[k] > layer[k-1] && layer[k] > layer[k+1] ) {
@@ -133,8 +122,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
                 }
             }
         }
-        
+        cudaFree(posval_d);
+        cudaFree(layer_copy_d);
     }
     cudaFree(layer_d);
-    cudaFree(posval_d);
 }
