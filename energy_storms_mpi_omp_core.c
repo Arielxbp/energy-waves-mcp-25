@@ -78,14 +78,12 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     for( i=0; i<num_storms; i++) {
         /* 4.1. Add impacts energies to layer cells */
         /* For each particle */
-        for( j=0; j<storms[i].size; j++ ) {
-            float energy = (float)storms[i].posval[j*2+1] * 1000;
-            int pos = storms[i].posval[j*2];
-            #pragma omp parallel for schedule(static)
-            for( k=0; k<chunk_size; k++ ) {
+        #pragma omp parallel for schedule(static) collapse(2)
+        for( k=0; k<chunk_size; k++ ) {
+            for( j=0; j<storms[i].size; j++ ) {
             /* For each cell in the layer */
                 /* Update the energy value for the cell */
-                layer[k] += update(layer_size, k+displs[rank], pos, energy);
+                layer[k] += update(layer_size, k+displs[rank], storms[i].posval[j*2], (float)storms[i].posval[j*2+1] * 1000);
             }
         }
         /*
@@ -106,86 +104,28 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         
         /* 4.2.2. Update layer using the ancillary values.
                   Skip updating the first and last positions */
-        float onethird = 1.0/3.0; 
-        float to_recv[2];
-        MPI_Status status;
-
-
-        for (int i=1; i<chunk_size; i++) {
-            layer[i] = (layer_copy[i-1] + layer_copy[i] + layer_copy[i+1]) * onethird;
-        }
-
-        if (rank % 2 == 0) {
-
-            if (rank != 0) {
-                MPI_Send(&layer_copy[0], 1, MPI_FLOAT, rank - 1, 1000 + size + rank, MPI_COMM_WORLD);
-            }
-
-            if (rank != size - 1) {
-                MPI_Recv(&to_recv[1], 1, MPI_FLOAT, rank + 1, 1000 + size + (rank + 1), MPI_COMM_WORLD, &status);
-            }
-
-        } else {
-
-            if (rank != size - 1) {
-                MPI_Recv(&to_recv[1], 1, MPI_FLOAT, rank + 1, 1000 + size + (rank + 1), MPI_COMM_WORLD, &status);
-            }
-
-            if (rank != 0) {
-                MPI_Send(&layer_copy[0], 1, MPI_FLOAT, rank - 1, 1000 + size + rank, MPI_COMM_WORLD);
-            }
-        }
-
-        if (rank % 2 == 0) {
-
-            if (rank != size - 1) {
-                MPI_Send(&layer_copy[chunk_size - 1], 1, MPI_FLOAT, rank + 1, 2000 + size + rank, MPI_COMM_WORLD);
-            }
-
-            if (rank != 0) {
-                MPI_Recv(&to_recv[0], 1, MPI_FLOAT, rank - 1, 2000 + size + (rank - 1), MPI_COMM_WORLD, &status);
-            }
-
-        } else {
-
-            if (rank != 0) {
-                MPI_Recv(&to_recv[0], 1, MPI_FLOAT, rank - 1, 2000 + size + (rank - 1), MPI_COMM_WORLD, &status);
-            }
-
-            if (rank != size - 1) {
-                MPI_Send(&layer_copy[chunk_size - 1], 1, MPI_FLOAT, rank + 1, 2000 + size + rank, MPI_COMM_WORLD);
-            }
-        }
-
-        if (rank != 0) layer[0] = (layer_copy[1] + layer_copy[0] + to_recv[0]) * onethird;
-        if (rank != size - 1) layer[chunk_size - 1] = (layer_copy[chunk_size - 2] + layer_copy[chunk_size - 1] + to_recv[1]) * onethird;
-        /*
         MPI_Status status;
         if (rank > 0) {
             if (rank < size-1)
             {
                 float left, right;
                 MPI_Sendrecv(&layer[0], 1, MPI_FLOAT, rank-1, 0, &left, 1, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD, &status);
-                layer[0] = ( left + layer_copy[0] + layer_copy[1] ) * onethird;
+                layer[0] = ( left + layer_copy[0] + layer_copy[1] ) / 3;
                 
                 MPI_Sendrecv(&layer[chunk_size-1], 1, MPI_FLOAT, rank+1, 0, &right, 1, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD, &status);
-                layer[chunk_size-1] = ( layer_copy[chunk_size-2] + layer_copy[chunk_size-1] + right ) * onethird;
+                layer[chunk_size-1] = ( layer_copy[chunk_size-2] + layer_copy[chunk_size-1] + right ) / 3;
             } else {
                 float left;
                 MPI_Sendrecv(&layer[0], 1, MPI_FLOAT, rank-1, 0, &left, 1, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD, &status);
-                layer[0] = ( left + layer_copy[0] + layer_copy[1] ) * onethird;
+                layer[0] = ( left + layer_copy[0] + layer_copy[1] ) / 3;
             }
         } else {
             if (size > 1) {
                 float right;
                 MPI_Sendrecv(&layer[chunk_size-1], 1, MPI_FLOAT, rank+1, 0, &right, 1, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD, &status);
-                layer[chunk_size-1] = ( layer_copy[chunk_size-2] + layer_copy[chunk_size-1] + right ) * onethird;
+                layer[chunk_size-1] = ( layer_copy[chunk_size-2] + layer_copy[chunk_size-1] + right ) / 3;
             }
         }
-        #pragma omp parallel for schedule(static)
-        for( k=1; k<chunk_size-1; k++ )
-            layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) * onethird;        
-        */
         /*(
         printf("Rank %d: Storm %d layer after exchange and border updates:\n", rank, i);
         printf("[");
@@ -194,19 +134,10 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
         printf("%f]\n", local_layer[chunk_size-1]);
 */
-        
-        /*(
-        printf("Rank %d: Storm %d layer after exchange and border updates:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", local_layer[i]);
-        }
-        printf("%f]\n", local_layer[chunk_size-1]);
-*//*
         #pragma omp parallel for schedule(static)
         for( k=1; k<chunk_size-1; k++ )
             layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;        
-    */    
+        
         
         /*printf("Rank %d: Storm %d layer after relaxation:\n", rank, i);
         printf("[");
