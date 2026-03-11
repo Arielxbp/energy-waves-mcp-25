@@ -39,8 +39,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     
     int int_chunk_size = layer_size / size;
     int rem = layer_size % size;
-    int sizes[size];
-    int displs[size];
+    int* sizes = (int*)malloc(size * sizeof(int));
+    int* displs = (int*)malloc(size * sizeof(int));
     displs[0] = 0;
 
     for (int i = 0; i < size; i++) {
@@ -58,7 +58,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     float *layer = (float *)malloc( sizeof(float) * (chunk_size) );
     float *layer_copy = (float *)malloc( sizeof(float) * (chunk_size) );
     
-    if ( layer == NULL) {
+    if ( layer == NULL || layer_copy == NULL ) {
         fprintf(stderr,"Error: Allocating the layer memory\n");
         exit( EXIT_FAILURE );
     }
@@ -78,12 +78,13 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     for( i=0; i<num_storms; i++) {
         /* 4.1. Add impacts energies to layer cells */
         /* For each particle */
-        #pragma omp parallel for schedule(static) collapse(2)
-        for( k=0; k<chunk_size; k++ ) {
-            for( j=0; j<storms[i].size; j++ ) {
+        for( j=0; j<storms[i].size; j++ ) {
+            float energy = (float)storms[i].posval[j*2+1] * 1000;
+            int position = storms[i].posval[j*2];
+            for( k=0; k<chunk_size; k++ ) {
             /* For each cell in the layer */
                 /* Update the energy value for the cell */
-                layer[k] += update(layer_size, k+displs[rank], storms[i].posval[j*2], (float)storms[i].posval[j*2+1] * 1000);
+                layer[k] += update(layer_size, k+displs[rank], position, energy);
             }
         }
         /*
@@ -95,6 +96,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         printf("%f]\n", local_layer[chunk_size-1]);
         */
         /* 4.2. Energy relaxation between storms */
+        MPI_Barrier(MPI_COMM_WORLD);
 
         /* 4.2.1. Copy current layer to ancillary array */
         #pragma omp parallel for schedule(static)
