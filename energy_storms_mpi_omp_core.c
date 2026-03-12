@@ -78,6 +78,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     for( i=0; i<num_storms; i++) {
         /* 4.1. Add impacts energies to layer cells */
         /* For each particle */
+        #pragma omp parallel for schedule(static)
         for( j=0; j<storms[i].size; j++ ) {
             float energy = (float)storms[i].posval[j*2+1] * 1000;
             int position = storms[i].posval[j*2];
