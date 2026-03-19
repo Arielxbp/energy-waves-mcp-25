@@ -7,7 +7,7 @@
 
 /* THIS FUNCTION CAN BE MODIFIED */
 /* Function to update a single position of the layer */
-static float update(int layer_size, int k, int pos, float energy ) {
+static float update(int layer_size, int k, int pos, float energy, float threshold_scaled) {
     /* 1. Compute the absolute value of the distance between the
         impact position and the k-th position of the layer */
     int distance = pos - k;
@@ -25,7 +25,7 @@ static float update(int layer_size, int k, int pos, float energy ) {
     float energy_k = energy / layer_size / atenuacion;
 
     /* 5. Do not add if its absolute value is lower than the threshold */
-    return ( energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size ) ? energy_k : 0.0f;
+    return ( energy_k >= threshold_scaled || energy_k <= -threshold_scaled ) ? energy_k : 0.0f;
     
 }
 
@@ -36,6 +36,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+    
+    const float threshold_scaled = THRESHOLD / layer_size;
     
     int int_chunk_size = layer_size / size;
     int rem = layer_size % size;
@@ -78,13 +80,12 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     for( i=0; i<num_storms; i++) {
         /* 4.1. Add impacts energies to layer cells */
         /* For each particle */
-        for( j=0; j<storms[i].size; j++ ) {
-            float energy = (float)storms[i].posval[j*2+1] * 1000;
-            int position = storms[i].posval[j*2];
-            for( k=0; k<chunk_size; k++ ) {
+        #pragma omp parallel for schedule(static) collapse(2)
+        for( k=0; k<chunk_size; k++ ){
+            for( j=0; j<storms[i].size; j++ ){
             /* For each cell in the layer */
                 /* Update the energy value for the cell */
-                layer[k] += update(layer_size, k+displs[rank], position, energy);
+                layer[k] += update(layer_size, k+displs[rank], storms[i].posval[j*2], (float)storms[i].posval[j*2+1] * 1000, threshold_scaled);
             }
         }
         /*
@@ -96,7 +97,6 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         printf("%f]\n", local_layer[chunk_size-1]);
         */
         /* 4.2. Energy relaxation between storms */
-        MPI_Barrier(MPI_COMM_WORLD);
 
         /* 4.2.1. Copy current layer to ancillary array */
         #pragma omp parallel for schedule(static)
@@ -112,17 +112,17 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         float tleft, tright;
          
         if (rank > 0) {
-            MPI_Irecv(&tleft, 1, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD, &reqs[nreqs++]);
+            MPI_Irecv(&tleft, 1, MPI_FLOAT, rank-1, 1, MPI_COMM_WORLD, &reqs[nreqs++]);
         }
         if (rank < size-1) {
-            MPI_Irecv(&tright, 1, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD, &reqs[nreqs++]);
+            MPI_Irecv(&tright, 1, MPI_FLOAT, rank+1, 1, MPI_COMM_WORLD, &reqs[nreqs++]);
         }
             
         if (rank > 0) {
-           MPI_Isend(&layer[0], 1, MPI_FLOAT, rank-1, 0, MPI_COMM_WORLD, &reqs[nreqs++]);
+           MPI_Isend(&layer[0], 1, MPI_FLOAT, rank-1, 1, MPI_COMM_WORLD, &reqs[nreqs++]);
         }
         if (rank < size-1) {
-            MPI_Isend(&layer[chunk_size-1], 1, MPI_FLOAT, rank+1, 0, MPI_COMM_WORLD, &reqs[nreqs++]);
+            MPI_Isend(&layer[chunk_size-1], 1, MPI_FLOAT, rank+1, 1, MPI_COMM_WORLD, &reqs[nreqs++]);
         }
         
         /*(
@@ -146,33 +146,64 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         if (rank < size-1) {
             layer[chunk_size-1] = (layer_copy[chunk_size-1] + layer_copy[chunk_size-2] + tright) / 3;
         }
-        
-        /*printf("Rank %d: Storm %d layer after relaxation:\n", rank, i);
+        /*
+        printf("Rank %d: Storm %d layer after relaxation:\n", rank, i);
         printf("[");
         for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", local_layer[i]);
+            printf("%f,", layer[i]);
         }
-        printf("%f]\n", local_layer[chunk_size-1]);
-        MPI_Barrier(MPI_COMM_WORLD);*/
+        printf("%f]\n", layer[chunk_size-1]);*/
 
-	    float lmax = layer[0];
-        float lpos = displs[rank];
-        /* 4.3. Locate the maximum value in the layer, and its position */
-        for( k=0; k<chunk_size; k++ ) {
-            /* Check it only if it is a local maximum */
-            if (layer[k] >= lmax) {
-                lmax = layer[k];
-                lpos = k + displs[rank];
+        nreqs = 0;
+         
+        if (rank > 0) {
+            MPI_Irecv(&tleft, 1, MPI_FLOAT, rank-1, 2, MPI_COMM_WORLD, &reqs[nreqs++]);
+        }
+        if (rank < size-1) {
+            MPI_Irecv(&tright, 1, MPI_FLOAT, rank+1, 2, MPI_COMM_WORLD, &reqs[nreqs++]);
+        }
+            
+        if (rank > 0) {
+           MPI_Isend(&layer[0], 1, MPI_FLOAT, rank-1, 2, MPI_COMM_WORLD, &reqs[nreqs++]);
+        }
+        if (rank < size-1) {
+            MPI_Isend(&layer[chunk_size-1], 1, MPI_FLOAT, rank+1, 2, MPI_COMM_WORLD, &reqs[nreqs++]);
+        }
+        MPI_Waitall(nreqs, reqs, stats);
+
+        /*printf("Rank %d: Storm %d before max:\n", rank, i);
+        printf("[");
+        for (int i = 0; i < chunk_size-1; i++) {
+            printf("%f,", layer[i]);
+        }
+        printf("%f]\n", layer[chunk_size-1]);*/
+
+	    float lmax = - __FLT_MAX__;
+        int lpos = 0; // sensible default
+
+        // border check left
+        if (rank > 0 && layer[0] > tleft && layer[0] > layer[1] && layer[0] > lmax) {
+            lmax = layer[0];
+        }
+        // interior
+        for (k = 1; k < chunk_size-1; k++) {
+            if (layer[k] > layer[k-1] && layer[k] > layer[k+1] && layer[k] > lmax) {
+                lmax = layer[k]; lpos = k;
             }
         }
-        local_max.max = lmax;
-        local_max.pos = lpos;
-        //printf("Rank %d: Storm %d before reduction local max %f at position %d\n", rank, i, max, pos);
-        
+        // border right
+        if (rank < size-1 && layer[chunk_size-1] > tright && layer[chunk_size-1] > layer[chunk_size-2]
+            && layer[chunk_size-1] > lmax) {
+            lmax = layer[chunk_size-1]; lpos = chunk_size-1;
+        }
 
-        //printf("Rank %d: Storm %d local max %f at position %d\n", rank, i, max, pos);
+
+        local_max.max = lmax;
+        local_max.pos = lpos+displs[rank];
+        //printf("Rank %d: Storm %d max: %f at position %d\n", rank, i, lmax, lpos);
+
         /* 4.4. Reduce to get the global maximum and its position */
-        MPI_Allreduce(&local_max, &global_max, 1, MPI_FLOAT_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+        MPI_Reduce(&local_max, &global_max, 1, MPI_FLOAT_INT, MPI_MAXLOC, 0, MPI_COMM_WORLD);
 
         if (rank == 0)
         {
