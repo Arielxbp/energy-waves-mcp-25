@@ -1,148 +1,177 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <float.h>
+#include <string.h>
 #include "energy_storms.h"
 #include <omp.h>
 #include <mpi.h>
 
 void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions) {
     int i, j, k, size, rank;
-    /* 3. Allocate memory for the layer and initialize to zero */
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-    
-    int int_chunk_size = layer_size / size;
-    int rem = layer_size % size;
-    int lsize = int_chunk_size + (rank < rem ? 1 : 0);
-    int start = rank*int_chunk_size + (rank < rem ? rank : rem);
 
-    float *layer = (float *)calloc(lsize+2, sizeof(float))+1;
-    float *layer_copy = (float *)calloc(lsize+2, sizeof(float))+1;
-    
-    if ( layer == NULL || layer_copy == NULL ) {
-        fprintf(stderr,"Error: Allocating the layer memory\n");
-        exit( EXIT_FAILURE );
+    int chunk = layer_size / size;
+    int rem   = layer_size % size;
+    int lsize = chunk + (rank < rem ? 1 : 0);
+    int start = rank * chunk + (rank < rem ? rank : rem);
+
+    /* Allocate with one ghost cell on each side */
+    float *layer_base      = (float *)calloc(lsize + 2, sizeof(float));
+    float *layer_copy_base = (float *)calloc(lsize + 2, sizeof(float));
+    if (!layer_base || !layer_copy_base) {
+        fprintf(stderr, "Error: Allocating the layer memory\n");
+        exit(EXIT_FAILURE);
     }
+    float *layer      = layer_base + 1;   /* layer[-1] and layer[lsize] are valid */
+    float *layer_copy = layer_copy_base + 1;
 
-    struct {
-        float max;
-        int rank;
-    } global_max, local_max;
+    int left  = (rank > 0)        ? rank - 1 : MPI_PROC_NULL;
+    int right = (rank < size - 1) ? rank + 1 : MPI_PROC_NULL;
 
-    //MPI_Scatterv(layer, sizes, displs, MPI_FLOAT, local_layer, sizes[rank], MPI_FLOAT, 0, MPI_COMM_WORLD);
-    /* 4. Storms simulation */
-    for( i=0; i<num_storms; i++) {
-        /* 4.1. Add impacts energies to layer cells */
-        /* For each particle */
-        //#pragma omp parallel for schedule(static) collapse(2)
-        for( j=0; j<storms[i].size; j++ ){
-            float energy = (float)storms[i].posval[j*2+1] * 1000.0f;
-            int pos = storms[i].posval[j*2]; 
-            for( k=0; k<lsize; k++ ){
-            /* For each cell in the layer */
-                /* Update the energy value for the cell */
-                int distance = pos - k-start;
-                if ( distance < 0 ) distance = - distance;
+    /* Keep sequential arithmetic order for better numerical match */
+    float layer_size_f  = (float)layer_size;
+    float threshold_div = THRESHOLD / layer_size_f;
 
-                /* 2. Impact cell has a distance value of 1 */
-                distance = distance + 1;
+    /* Flatten storm data once, outside storm loop, for cache friendliness */
+    int max_ssize = 0;
+    for (i = 0; i < num_storms; i++)
+        if (storms[i].size > max_ssize) max_ssize = storms[i].size;
+    float *s_energy = (float *)malloc(max_ssize * sizeof(float));
+    int   *s_pos    = (int   *)malloc(max_ssize * sizeof(int));
+    float *atten_lut = (float *)malloc((size_t)(layer_size + 1) * sizeof(float));
+    if (!s_energy || !s_pos || !atten_lut) {
+        fprintf(stderr, "Error: Allocating storm scratch buffers\n");
+        exit(EXIT_FAILURE);
+    }
+    for (k = 1; k <= layer_size; k++) atten_lut[k] = sqrtf((float)k);
 
-                /* 3. Square root of the distance */
-                /* NOTE: Real world atenuation typically depends on the square of the distance.
-                We use here a tailored equation that affects a much wider range of cells */
-                float atenuacion = sqrtf( (float)distance );
+    struct { float val; int pos; } lmax_s, gmax_s;
 
-                /* 4. Compute attenuated energy */
-                float energy_k = energy / layer_size / atenuacion;
+    for (i = 0; i < num_storms; i++) {
+        int ssize = storms[i].size;
 
-                /* 5. Do not add if its absolute value is lower than the threshold */
-                layer[k] += (energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size) ? energy_k : 0.0f;
-                
+        for (j = 0; j < ssize; j++) {
+            s_pos[j]    = storms[i].posval[j * 2];
+            s_energy[j] = ((float)storms[i].posval[j * 2 + 1] * 1000.0f) / layer_size_f;
+        }
+
+        /* ---------------------------------------------------------------
+         * IMPACT: k-outer / j-inner, OMP on k.
+         *
+         * FIX 1: use direct  layer[k] += ek  (not a cell_energy accumulator).
+         *   Sequential adds to layer[k] once per particle in j-order.
+         *   CUDA does the same per thread.  Using a cell_energy variable
+         *   changes the FP addition order and causes the value divergence.
+         *   With direct +=, the j-order within each cell matches both.
+         * --------------------------------------------------------------- */
+        #pragma omp parallel for schedule(static) private(j)
+        for (k = 0; k < lsize; k++) {
+            int gk = k + start;
+            for (j = 0; j < ssize; j++) {
+                int   dist  = abs(s_pos[j] - gk) + 1;
+                float ek    = s_energy[j] / atten_lut[dist];
+                if (ek >= threshold_div || ek <= -threshold_div)
+                    layer[k] += ek;
             }
         }
-        /*
-        printf("Rank %d: Storm %d layer after impacts:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", local_layer[i]);
+
+        /* ---------------------------------------------------------------
+         * GHOST EXCHANGE #1 — before relaxation (pre-relax values).
+         *   FIX (original code): the send/recv directions were swapped.
+         *   Correct rule:
+         *     send last element  → right neighbour's left ghost  layer[-1]
+         *     send first element → left  neighbour's right ghost layer[lsize]
+         * --------------------------------------------------------------- */
+        MPI_Sendrecv(&layer[lsize - 1], 1, MPI_FLOAT, right, 0,
+                     &layer[-1],        1, MPI_FLOAT, left,  0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&layer[0],    1, MPI_FLOAT, left,  1,
+                     &layer[lsize], 1, MPI_FLOAT, right, 1,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+        /* ---------------------------------------------------------------
+         * COPY — include ghost cells.
+         *
+         * FIX 2: original copy only covered k=0..lsize-1.
+         *   The relaxation of the first/last local cell accesses
+         *   layer_copy[-1] / layer_copy[lsize].  Without copying them
+         *   those stay 0 (calloc), giving wrong averaged values at
+         *   rank borders.  Error accumulates across storms.
+         * --------------------------------------------------------------- */
+        layer_copy[-1]    = layer[-1];
+        memcpy(layer_copy, layer, (size_t)lsize * sizeof(float));
+        layer_copy[lsize] = layer[lsize];
+
+        /* RELAX — skip global positions 0 and layer_size-1 (matching sequential) */
+        #pragma omp parallel for schedule(static)
+        for (k = 0; k < lsize; k++) {
+            int gk = k + start;
+            if (gk == 0 || gk == layer_size - 1) continue;
+            layer[k] = (layer_copy[k - 1] + layer_copy[k] + layer_copy[k + 1]) / 3.0f;
         }
-        printf("%f]\n", local_layer[chunk_size-1]);
-        */
-        /* 4.2. Energy relaxation between storms */
 
-        /* 4.2.1. Copy current layer to ancillary array */
-        
-        /* 4.2.2. Update layer using the ancillary values.
-                  Skip updating the first and last positions */
-        int left = (rank > 0) ? rank-1:MPI_PROC_NULL;
-        int right = (rank < size - 1) ? rank+1:MPI_PROC_NULL;
+        /* ---------------------------------------------------------------
+         * GHOST EXCHANGE #2 — after relaxation (post-relax values).
+         *
+         * FIX 3: max-finding at a rank border compares layer[k] with
+         *   layer[-1] / layer[lsize].  Without a second exchange those
+         *   ghosts still hold pre-relax values → wrong local-max
+         *   decisions at borders (critical for test_03..test_06).
+         * --------------------------------------------------------------- */
+        MPI_Sendrecv(&layer[lsize - 1], 1, MPI_FLOAT, right, 2,
+                     &layer[-1],        1, MPI_FLOAT, left,  2,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&layer[0],    1, MPI_FLOAT, left,  3,
+                     &layer[lsize], 1, MPI_FLOAT, right, 3,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&layer[0], 1, MPI_FLOAT, left, 0, &layer[lsize], 1, MPI_FLOAT, right, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Sendrecv(&layer[lsize - 1], 1, MPI_FLOAT, left, 1, &layer[-1], 1, MPI_FLOAT, right,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        /* MAX FIND — thread-local then omp critical, single MPI_Allreduce */
+        float lmax = 0.0f;
+        int   lpos = 0;
 
-        
-        for( k=0; k<lsize; k++ )
-            layer_copy[k] = layer[k];
+        #pragma omp parallel
+        {
+            float tmax = 0.0f;
+            int   tpos = 0;
 
-        /*(
-        printf("Rank %d: Storm %d layer after exchange and border updates:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", local_layer[i]);
-        }
-        printf("%f]\n", local_layer[chunk_size-1]);*/    
-
-        for( k=0; k<lsize; k++ ) {
-            if ((k+start == 0 && k+start == layer_size-1) == 0) {
-                layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3.0f; 
+            #pragma omp for schedule(static) nowait
+            for (k = 0; k < lsize; k++) {
+                int gk = k + start;
+                if (gk == 0 || gk == layer_size - 1) continue;
+                if (layer[k] > layer[k - 1] && layer[k] > layer[k + 1]) {
+                    float v = layer[k];
+                    if (v > tmax || (v == tmax && gk < tpos)) {
+                        tmax = v;
+                        tpos = gk;
+                    }
+                }
             }
-        }
-        /*
-        printf("Rank %d: Storm %d layer after relaxation:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", layer[i]);
-        }
-        printf("%f]\n", layer[chunk_size-1]);*/
-        /*printf("Rank %d: Storm %d before max:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", layer[i]);
-        }
-        printf("%f]\n", layer[chunk_size-1]);*/
-
-	    float lmax = - __FLT_MAX__;
-        int lpos = 0;
-
-        for( k=0; k<lsize; k++ ) {
-            if ((k+start == 0 && k+start == layer_size-1) == 0) {
-                if (layer[k] > layer[k-1] && layer[k] > layer[k+1] && layer[k] > lmax) {
-                lmax = layer[k]; lpos = k+start;
+            #pragma omp critical
+            {
+                if (tmax > lmax || (tmax == lmax && tpos < lpos)) {
+                    lmax = tmax;
+                    lpos = tpos;
                 }
             }
         }
 
+        /* Single collective (value + global position), deterministic tie-break */
+        lmax_s.val  = lmax;
+        lmax_s.pos  = lpos;
+        MPI_Allreduce(&lmax_s, &gmax_s, 1, MPI_FLOAT_INT, MPI_MAXLOC, MPI_COMM_WORLD);
 
-        local_max.max = lmax;
-        local_max.rank = rank;
-        global_max.max = 0.0f;
-        global_max.rank = 0;
-        //printf("Rank %d: Storm %d max: %f at position %d\n", rank, i, lmax, lpos);
-
-        /* 4.4. Reduce to get the global maximum and its position */
-        MPI_Reduce(&local_max, &global_max, 1, MPI_FLOAT_INT, MPI_MAXLOC, 0, MPI_COMM_WORLD);
-
-        int max_owner = (rank == 0) ? global_max.rank : 0;
-        MPI_Bcast(&max_owner, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-        int global_max_pos = (rank == max_owner) ? lpos : 0;
-        MPI_Bcast(&global_max_pos, 1, MPI_INT, max_owner, MPI_COMM_WORLD);
-        if (rank == 0)
-        {
-            maximum[i] = global_max.max;
-            positions[i] = global_max_pos;
+        if (rank == 0) {
+            maximum[i]   = gmax_s.val;
+            positions[i] = gmax_s.pos;
         }
     }
-    //MPI_Gatherv(local_layer, sizes[rank], MPI_FLOAT, layer, sizes, displs, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+    free(s_energy);
+    free(s_pos);
+    free(atten_lut);
+    free(layer_base);
+    free(layer_copy_base);
 }

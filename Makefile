@@ -48,27 +48,27 @@ help:
 		@echo "make energy_storms_cuda		  Build only the CUDA version"
 
 energy_storms_core.o: energy_storms_core.c energy_storms.h
-		$(CC) $(DEBUG) -c $< $(LIBS) -o $@
+		$(CC) $(FLAGS) $(DEBUG) -c $< $(LIBS) -o $@
 
 energy_storms_seq: energy_storms_seq.c energy_storms.h energy_storms_core.o
-		$(CC) $(DEBUG) $< energy_storms_core.o $(LIBS) -o $@
+		$(CC) $(FLAGS) $(DEBUG) $< energy_storms_core.o $(LIBS) -o $@
 
 energy_storms_mpi_omp_core.o: energy_storms_mpi_omp_core.c energy_storms.h
-		$(MPICC) $(DEBUG) $(OMPFLAG) $(MPI_OMP_EXTRA_CFLAGS) -c $< $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
+		$(MPICC) $(FLAGS) $(DEBUG) $(OMPFLAG) $(MPI_OMP_EXTRA_CFLAGS) -c $< $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
 
 energy_storms_mpi_omp: energy_storms_mpi_omp.c energy_storms.h energy_storms_mpi_omp_core.o
-		$(MPICC) $(DEBUG) $(OMPFLAG) $(MPI_OMP_EXTRA_CFLAGS) $< energy_storms_mpi_omp_core.o $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
+		$(MPICC) $(FLAGS) $(DEBUG) $(OMPFLAG) $(MPI_OMP_EXTRA_CFLAGS) $< energy_storms_mpi_omp_core.o $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
 	
 energy_storms_cuda_core.o: energy_storms_cuda_core.cu energy_storms.h
-		$(CUDACC) $(DEBUG) $(CUDA_EXTRA_CFLAGS) -c $< $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
+		$(CUDACC) $(DEBUG) $(FLAGS) $(CUDA_EXTRA_CFLAGS) -c $< $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
 
 energy_storms_cuda: energy_storms_cuda.cpp energy_storms.h energy_storms_cuda_core.o
-		$(CUDACC) $(DEBUG) $(CUDA_EXTRA_CFLAGS) $< energy_storms_cuda_core.o $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
+		$(CUDACC) $(DEBUG) $(FLAGS) $(CUDA_EXTRA_CFLAGS) $< energy_storms_cuda_core.o $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
 
 # ----- Addon for benchmarking -----
 
 energy_storms_cuda_bench: energy_storms_cuda_bench.cpp energy_storms.h energy_storms_cuda_core.o
-	$(CUDACC) $(DEBUG) $(CUDA_EXTRA_CFLAGS) $< energy_storms_cuda_core.o $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
+	$(CUDACC) $(DEBUG) $(FLAGS) $(CUDA_EXTRA_CFLAGS) $< energy_storms_cuda_core.o $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
 
 run_cuda_bench:
 	srun -N 1 -n 1 ./energy_storms_cuda_bench -r 30 20000 \
