@@ -6,8 +6,10 @@
                 "${workspaceFolder}/**",
                 "/opt/cuda/**"
             ],
-            "defines": [],
-            "compilerPath": "/usr/bin/gcc",
+            "defines": [
+
+            ],
+            "compilerPath": "/opt/cuda/bin/nvcc", // default: /usr/bin/gcc
             "cStandard": "c17",
             "cppStandard": "gnu++17",
             "intelliSenseMode": "linux-gcc-x64"

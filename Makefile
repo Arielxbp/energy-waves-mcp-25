@@ -27,8 +27,8 @@ OMPFLAG=-fopenmp
 FLAGS=-O3
 LIBS=-lm
 
-# Targets to build
-OBJS=energy_storms_seq energy_storms_mpi_omp energy_storms_cuda energy_storms_core.o energy_storms_mpi_omp_core.o energy_storms_cuda_core.o
+# Targets to build --- energy_storms_cuda_bench is an addon for benchmarking
+OBJS=energy_storms_seq energy_storms_mpi_omp energy_storms_cuda energy_storms_core.o energy_storms_mpi_omp_core.o energy_storms_cuda_core.o energy_storms_cuda_bench
 
 all: $(OBJS)
 
@@ -64,6 +64,19 @@ energy_storms_cuda_core.o: energy_storms_cuda_core.cu energy_storms.h
 
 energy_storms_cuda: energy_storms_cuda.cpp energy_storms.h energy_storms_cuda_core.o
 		$(CUDACC) $(DEBUG) $(CUDA_EXTRA_CFLAGS) $< energy_storms_cuda_core.o $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
+
+# ----- Addon for benchmarking -----
+
+energy_storms_cuda_bench: energy_storms_cuda_bench.cpp energy_storms.h energy_storms_cuda_core.o
+	$(CUDACC) $(DEBUG) $(CUDA_EXTRA_CFLAGS) $< energy_storms_cuda_core.o $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
+
+run_cuda_bench:
+	srun -N 1 -n 1 ./energy_storms_cuda_bench -r 30 20000 \
+	    test_files/test_02_a30k_p20k_w1 test_files/test_02_a30k_p20k_w2 \
+	    test_files/test_02_a30k_p20k_w3 test_files/test_02_a30k_p20k_w4 \
+	    test_files/test_02_a30k_p20k_w5 test_files/test_02_a30k_p20k_w6
+
+# ----- End of addon for benchmarking -----
 
 # Remove the target files
 clean:
