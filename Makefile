@@ -71,7 +71,7 @@ energy_storms_cuda_bench: energy_storms_cuda_bench.cpp energy_storms.h energy_st
 	$(CUDACC) $(DEBUG) $(FLAGS) $(CUDA_EXTRA_CFLAGS) $< energy_storms_cuda_core.o $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
 
 run_cuda_bench:
-	srun -N 1 -n 1 ./energy_storms_cuda_bench -r 30 20000 \
+	./energy_storms_cuda_bench -r 30 20000 \
 	    test_files/test_02_a30k_p20k_w1 test_files/test_02_a30k_p20k_w2 \
 	    test_files/test_02_a30k_p20k_w3 test_files/test_02_a30k_p20k_w4 \
 	    test_files/test_02_a30k_p20k_w5 test_files/test_02_a30k_p20k_w6
