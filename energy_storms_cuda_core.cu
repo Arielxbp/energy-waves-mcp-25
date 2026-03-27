@@ -6,7 +6,7 @@
 
 /* THIS FUNCTION CAN BE MODIFIED */
 /* Function to update a single position of the layer */
-__device__ float update(int affected_position, int layer_size, float energy, int contact_position) {
+__device__ __forceinline__ float update(int affected_position, int layer_size, float energy, int contact_position) {
 
     /* 1. Compute the absolute value of the distance between the
         impact position and the k-th position of the layer */
@@ -44,15 +44,20 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
     }
 }
 
-__global__ void relax(float* __restrict__ layer_d, const float* __restrict__ layer_copy_d, int layer_size) {
+__global__ void relax(float* __restrict__ layer_out_d, const float* __restrict__ layer_in_d, int layer_size) {
 
     // Grid-stride loop for handling layers > threads
     const int grid_stride = blockDim.x * gridDim.x;
     const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     
+    if (thread_id == 0) {
+        layer_out_d[0] = layer_in_d[0];
+        layer_out_d[layer_size - 1] = layer_in_d[layer_size - 1];
+    }
+
     // Each thread processes multiple contact points of the layer in a grid-stride loop
     for (int i = thread_id + 1; i < layer_size - 1; i += grid_stride) {
-        layer_d[i] = (layer_copy_d[i-1] + layer_copy_d[i] + layer_copy_d[i+1]) / 3.0f;
+        layer_out_d[i] = (layer_in_d[i-1] + layer_in_d[i] + layer_in_d[i+1]) / 3.0f;
     }
 }
 
@@ -112,10 +117,11 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     }
 
     /* 3.2. Allocate memory for the layer and initialize to zero */
-    float *layer_d, *layer_copy_d;
-    cudaMalloc((void **)&layer_d, sizeof(float) * layer_size);
-    cudaMalloc((void **)&layer_copy_d, sizeof(float) * layer_size);
-    cudaMemset(layer_d, 0, sizeof(float) * layer_size);
+    float *layer_a_d, *layer_b_d;
+    cudaMalloc((void **)&layer_a_d, sizeof(float) * layer_size);
+    cudaMalloc((void **)&layer_b_d, sizeof(float) * layer_size);
+    cudaMemset(layer_a_d, 0, sizeof(float) * layer_size);
+    cudaMemset(layer_b_d, 0, sizeof(float) * layer_size);
 
     /* 3.2.1 Allocate memory for the posval and initialize to zero */
     int *posval_d;
@@ -131,6 +137,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int *block_pos_h = (int *)malloc(sizeof(int) * nblocks);
 
     const size_t smem_max = BLOCK * (sizeof(float) + sizeof(int));
+    float *layer_curr_d = layer_a_d;
+    float *layer_next_d = layer_b_d;
 
     /* 4 Simulate for every storm */
     for (int i = 0; i < num_storms; i++) {
@@ -139,16 +147,17 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         cudaMemcpy(posval_d, storms[i].posval, sizeof(int) * storms[i].size * 2, cudaMemcpyHostToDevice);
 
         /* 4.2. Simulate impacts energy to layer cells */
-        bomb<<<gridDim, blockDim>>>(layer_d, layer_size, posval_d, storms[i].size);
-
-        /* 4.3. Copy the layer for relaxation */
-        cudaMemcpy(layer_copy_d, layer_d, sizeof(float) * layer_size, cudaMemcpyDeviceToDevice);
+        bomb<<<gridDim, blockDim>>>(layer_curr_d, layer_size, posval_d, storms[i].size);
         
         /* 4.4. Simulate energy relaxation */
-        relax<<<gridDim, blockDim>>>(layer_d, layer_copy_d, layer_size);
+        relax<<<gridDim, blockDim>>>(layer_next_d, layer_curr_d, layer_size);
+
+        float *tmp = layer_curr_d;
+        layer_curr_d = layer_next_d;
+        layer_next_d = tmp;
 
         /* 4.5 Find maximum energy and its position */
-        find_max<<<gridDim, blockDim, smem_max>>>(layer_d, layer_size, block_max_d, block_pos_d);
+        find_max<<<gridDim, blockDim, smem_max>>>(layer_curr_d, layer_size, block_max_d, block_pos_d);
 
         /* 4.6 Transfer results back to host for final reduction */
         cudaMemcpy(block_max_h, block_max_d, sizeof(float) * nblocks, cudaMemcpyDeviceToHost);
@@ -170,8 +179,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
     }
 
-    cudaFree(layer_d);
-    cudaFree(layer_copy_d);
+    cudaFree(layer_a_d);
+    cudaFree(layer_b_d);
     cudaFree(posval_d);
     cudaFree(block_max_d);
     cudaFree(block_pos_d);
