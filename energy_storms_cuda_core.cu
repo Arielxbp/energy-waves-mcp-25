@@ -25,7 +25,16 @@ __device__ __forceinline__ float update(int affected_position, int layer_size, f
     return (fabsf(energy_k) >= threshold) ? energy_k : 0.0f; // float abs()
 }
 
-__global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __restrict__ posval_d, int storm_size) {
+__global__ void prepare_storm(const int* __restrict__ posval_d, int* __restrict__ pos_d, float* __restrict__ energy_d, int storm_size) {
+
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < storm_size) {
+        pos_d[idx] = __ldg(&posval_d[idx * 2]);
+        energy_d[idx] = (float)__ldg(&posval_d[idx * 2 + 1]) * 1000.0f;
+    }
+}
+
+__global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __restrict__ pos_d, const float* __restrict__ energy_d, int storm_size) {
 
     // Grid-stride loop for handling storm > threads
     const int grid_stride = blockDim.x * gridDim.x;
@@ -37,8 +46,8 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
         // For each contact point i, compute all storm impacts and update the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
             // __ldg gives uniform access across the warp so one cache line serves all 32 threads per load
-            float energy = (float)__ldg(&posval_d[j * 2 + 1]) * 1000.0f;
-            int contact_position = __ldg(&posval_d[j * 2]);
+            float energy = __ldg(&energy_d[j]);
+            int contact_position = __ldg(&pos_d[j]);
             layer_d[i] += update(i, layer_size, energy, contact_position);
         }
     }
@@ -127,6 +136,11 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int *posval_d;
     cudaMalloc((void **)&posval_d, sizeof(int) * max_storm_size * 2);
 
+    int *pos_d;
+    float *energy_d;
+    cudaMalloc((void **)&pos_d, sizeof(int) * max_storm_size);
+    cudaMalloc((void **)&energy_d, sizeof(float) * max_storm_size);
+
     /* 3.2.2 Allocate memory for the block max and positions */
     float *block_max_d;
     int *block_pos_d;
@@ -137,6 +151,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int *block_pos_h = (int *)malloc(sizeof(int) * nblocks);
 
     const size_t smem_max = BLOCK * (sizeof(float) + sizeof(int));
+    const int prep_blocks = (max_storm_size + BLOCK - 1) / BLOCK;
     float *layer_curr_d = layer_a_d;
     float *layer_next_d = layer_b_d;
 
@@ -146,8 +161,11 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         /* 4.1. Transfer the i-th storm's particles */
         cudaMemcpy(posval_d, storms[i].posval, sizeof(int) * storms[i].size * 2, cudaMemcpyHostToDevice);
 
+        /* 4.1.1 Prepare position and energy arrays for better access in the hot loop */
+        prepare_storm<<<prep_blocks, blockDim>>>(posval_d, pos_d, energy_d, storms[i].size);
+
         /* 4.2. Simulate impacts energy to layer cells */
-        bomb<<<gridDim, blockDim>>>(layer_curr_d, layer_size, posval_d, storms[i].size);
+        bomb<<<gridDim, blockDim>>>(layer_curr_d, layer_size, pos_d, energy_d, storms[i].size);
         
         /* 4.4. Simulate energy relaxation */
         relax<<<gridDim, blockDim>>>(layer_next_d, layer_curr_d, layer_size);
@@ -182,6 +200,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     cudaFree(layer_a_d);
     cudaFree(layer_b_d);
     cudaFree(posval_d);
+    cudaFree(pos_d);
+    cudaFree(energy_d);
     cudaFree(block_max_d);
     cudaFree(block_pos_d);
     free(block_max_h);
