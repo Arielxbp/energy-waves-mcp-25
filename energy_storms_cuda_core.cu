@@ -30,21 +30,15 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
     // Grid-stride loop for handling storm > threads
     const int grid_stride = blockDim.x * gridDim.x;
     const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    const int lane = threadIdx.x & 31;
 
     // Each thread processes multiple contact points of the layer in a grid-stride loop
     for (int i = thread_id; i < layer_size; i += grid_stride) {
 
         // For each contact point i, compute all storm impacts and update the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
-            int contact_position = 0;
-            float energy = 0.0f;
-            if (lane == 0) {
-                contact_position = __ldg(&posval_d[j * 2]);
-                energy = (float)__ldg(&posval_d[j * 2 + 1]) * 1000.0f;
-            }
-            contact_position = __shfl_sync(0xffffffff, contact_position, 0);
-            energy = __shfl_sync(0xffffffff, energy, 0);
+            // __ldg gives uniform access across the warp so one cache line serves all 32 threads per load
+            float energy = (float)__ldg(&posval_d[j * 2 + 1]) * 1000.0f;
+            int contact_position = __ldg(&posval_d[j * 2]);
             layer_d[i] += update(i, layer_size, energy, contact_position);
         }
     }
@@ -109,14 +103,10 @@ __global__ void find_max(const float* __restrict__ layer_d, int layer_size, floa
 void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions) {
 
     /* 3.1. Obtain grid and block dimensions */
-    const int BOMB_BLOCK = 512;
-    const int REDUCE_BLOCK = 256;
-    const int bomb_nblocks = (layer_size + BOMB_BLOCK - 1) / BOMB_BLOCK;
-    const int reduce_nblocks = (layer_size + REDUCE_BLOCK - 1) / REDUCE_BLOCK;
-    dim3 bombBlockDim(BOMB_BLOCK);
-    dim3 bombGridDim(bomb_nblocks);
-    dim3 reduceBlockDim(REDUCE_BLOCK);
-    dim3 reduceGridDim(reduce_nblocks);
+    const int BLOCK = 256; // 256 threads per block
+    const int nblocks = (layer_size + BLOCK - 1) / BLOCK; // -1 to round the blocks needed
+    dim3 blockDim(BLOCK);
+    dim3 gridDim(nblocks);
 
     /* 3.1.1. Find the largest storm so posval_d can be allocated once */
     int max_storm_size = 0;
@@ -140,13 +130,13 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     /* 3.2.2 Allocate memory for the block max and positions */
     float *block_max_d;
     int *block_pos_d;
-    cudaMalloc((void **)&block_max_d, sizeof(float) * reduce_nblocks);
-    cudaMalloc((void **)&block_pos_d, sizeof(int) * reduce_nblocks);
+    cudaMalloc((void **)&block_max_d, sizeof(float) * nblocks);
+    cudaMalloc((void **)&block_pos_d, sizeof(int) * nblocks);
 
-    float *block_max_h = (float *)malloc(sizeof(float) * reduce_nblocks);
-    int *block_pos_h = (int *)malloc(sizeof(int) * reduce_nblocks);
+    float *block_max_h = (float *)malloc(sizeof(float) * nblocks);
+    int *block_pos_h = (int *)malloc(sizeof(int) * nblocks);
 
-    const size_t smem_max = REDUCE_BLOCK * (sizeof(float) + sizeof(int));
+    const size_t smem_max = BLOCK * (sizeof(float) + sizeof(int));
     float *layer_curr_d = layer_a_d;
     float *layer_next_d = layer_b_d;
 
@@ -157,26 +147,26 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         cudaMemcpy(posval_d, storms[i].posval, sizeof(int) * storms[i].size * 2, cudaMemcpyHostToDevice);
 
         /* 4.2. Simulate impacts energy to layer cells */
-        bomb<<<bombGridDim, bombBlockDim>>>(layer_curr_d, layer_size, posval_d, storms[i].size);
+        bomb<<<gridDim, blockDim>>>(layer_curr_d, layer_size, posval_d, storms[i].size);
         
         /* 4.4. Simulate energy relaxation */
-        relax<<<reduceGridDim, reduceBlockDim>>>(layer_next_d, layer_curr_d, layer_size);
+        relax<<<gridDim, blockDim>>>(layer_next_d, layer_curr_d, layer_size);
 
         float *tmp = layer_curr_d;
         layer_curr_d = layer_next_d;
         layer_next_d = tmp;
 
         /* 4.5 Find maximum energy and its position */
-        find_max<<<reduceGridDim, reduceBlockDim, smem_max>>>(layer_curr_d, layer_size, block_max_d, block_pos_d);
+        find_max<<<gridDim, blockDim, smem_max>>>(layer_curr_d, layer_size, block_max_d, block_pos_d);
 
         /* 4.6 Transfer results back to host for final reduction */
-        cudaMemcpy(block_max_h, block_max_d, sizeof(float) * reduce_nblocks, cudaMemcpyDeviceToHost);
-        cudaMemcpy(block_pos_h, block_pos_d, sizeof(int) * reduce_nblocks, cudaMemcpyDeviceToHost);
+        cudaMemcpy(block_max_h, block_max_d, sizeof(float) * nblocks, cudaMemcpyDeviceToHost);
+        cudaMemcpy(block_pos_h, block_pos_d, sizeof(int) * nblocks, cudaMemcpyDeviceToHost);
 
         /* 4.7 Host reduction over the per-block results */
         float global_max = -FLT_MAX; // Negative float max value
         int global_pos = -1;
-        for (int b = 0; b < reduce_nblocks; b++) {
+        for (int b = 0; b < nblocks; b++) {
             if (block_max_h[b] > global_max) {
                 global_max = block_max_h[b];
                 global_pos = block_pos_h[b];
