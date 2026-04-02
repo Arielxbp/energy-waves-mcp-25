@@ -1,7 +1,10 @@
 *.o
 energy_storms_seq
+energy_storms_cuda_core_v*
 energy_storms_cuda_v*
+energy_storms_cuda_core_baseline
 energy_storms_cuda
 test_file.txt
 test_file_*
 results.txt
+energy_storms_cuda_c*
