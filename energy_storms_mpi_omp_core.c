@@ -17,13 +17,14 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int chunk_size = int_chunk_size + (rank < rem ? 1 : 0);
     int start = rank*int_chunk_size + (rank < rem ? rank : rem);
 
-    float *layer = (float *)calloc(chunk_size+2, sizeof(float))+1;
-    float *layer_copy = (float *)calloc(chunk_size+2, sizeof(float))+1;
-    
-    if ( layer == NULL || layer_copy == NULL ) {
-        fprintf(stderr,"Error: Allocating the layer memory\n");
-        exit( EXIT_FAILURE );
+    float *layer_base      = (float *)calloc(chunk_size + 2, sizeof(float));
+    float *layer_copy_base = (float *)calloc(chunk_size + 2, sizeof(float));
+    if (!layer_base || !layer_copy_base) {
+        fprintf(stderr, "Error: Allocating the layer memory\n");
+        exit(EXIT_FAILURE);
     }
+    float *layer      = layer_base + 1;
+    float *layer_copy = layer_copy_base + 1;
 
     struct {
         float max;
@@ -44,6 +45,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int *precalc_positions = (int*)malloc(max_storm_size*sizeof(int));
 
     float layer_size_f = (float) layer_size;
+    float threshold = THRESHOLD / layer_size_f;
 
     //MPI_Scatterv(layer, sizes, displs, MPI_FLOAT, local_layer, sizes[rank], MPI_FLOAT, 0, MPI_COMM_WORLD);
     /* 4. Storms simulation */
@@ -66,7 +68,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
                 distance = distance + 1;
 
                 float energy_k = precalc_energy[j] / layer_size / sqrt_distances[distance];
-                cell_val += (energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size) ? energy_k : 0.0f;
+                float abs_k = fabsf(energy_k);
+                cell_val += (abs_k >= threshold) ? energy_k : 0.0f;
             }
             layer[k] = cell_val;
         }
@@ -84,50 +87,38 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         
         /* 4.2.2. Update layer using the ancillary values.
                   Skip updating the first and last positions */
-        int left = (rank > 0) ? rank-1:MPI_PROC_NULL;
-        int right = (rank < size - 1) ? rank+1:MPI_PROC_NULL;
+        /* Ghost cell exchange — corrected direction */
+        int left  = (rank > 0)        ? rank-1 : MPI_PROC_NULL;
+        int right = (rank < size - 1) ? rank+1 : MPI_PROC_NULL;
 
-        MPI_Sendrecv(&layer[0], 1, MPI_FLOAT, left, 0, &layer[chunk_size], 1, MPI_FLOAT, right, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Sendrecv(&layer[chunk_size - 1], 1, MPI_FLOAT, left, 1, &layer[-1], 1, MPI_FLOAT, right,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        /* Send rightmost element right, receive into right ghost cell */
+        MPI_Sendrecv(&layer[chunk_size-1], 1, MPI_FLOAT, right, 0,
+                    &layer[-1],           1, MPI_FLOAT, left,  0,
+                    MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        /* Send leftmost element left, receive into left ghost cell */
+        MPI_Sendrecv(&layer[0],          1, MPI_FLOAT, left,  1,
+                    &layer[chunk_size], 1, MPI_FLOAT, right, 1,
+                    MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        
-        for( k=0; k<chunk_size; k++ )
+        #pragma omp parallel for schedule(static) private(k)
+        for (k = 0; k < chunk_size; k++)
             layer_copy[k] = layer[k];
 
-        /*(
-        printf("Rank %d: Storm %d layer after exchange and border updates:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", local_layer[i]);
+        #pragma omp parallel for schedule(static) private(k)
+        for (k = 0; k < chunk_size; k++) {
+            int gk = k + start;
+            if (gk > 0 && gk < layer_size - 1)   /* correct boundary: || not && */
+                layer[k] = (layer_copy[k-1] + layer_copy[k] + layer_copy[k+1]) / 3.0f;
         }
-        printf("%f]\n", local_layer[chunk_size-1]);*/    
 
-        for( k=0; k<chunk_size; k++ ) {
-            if ((k+start == 0 && k+start == layer_size-1) == 0) {
-                layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3.0f; 
-            }
-        }
-        /*
-        printf("Rank %d: Storm %d layer after relaxation:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", layer[i]);
-        }
-        printf("%f]\n", layer[chunk_size-1]);*/
-        /*printf("Rank %d: Storm %d before max:\n", rank, i);
-        printf("[");
-        for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", layer[i]);
-        }
-        printf("%f]\n", layer[chunk_size-1]);*/
-
-	    float lmax = - __FLT_MAX__;
+        float lmax = -__FLT_MAX__;
         int lpos = 0;
 
-        for( k=0; k<chunk_size; k++ ) {
-            if ((k+start == 0 && k+start == layer_size-1) == 0) {
+        for (k = 0; k < chunk_size; k++) {
+            int gk = k + start;
+            if (gk > 0 && gk < layer_size - 1) {
                 if (layer[k] > layer[k-1] && layer[k] > layer[k+1] && layer[k] > lmax) {
-                lmax = layer[k]; lpos = k+start;
+                    lmax = layer[k]; lpos = gk;
                 }
             }
         }
@@ -140,13 +131,9 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         //printf("Rank %d: Storm %d max: %f at position %d\n", rank, i, lmax, lpos);
 
         /* 4.4. Reduce to get the global maximum and its position */
-        MPI_Reduce(&local_max, &global_max, 1, MPI_FLOAT_INT, MPI_MAXLOC, 0, MPI_COMM_WORLD);
-
-        int max_owner = (rank == 0) ? global_max.rank : 0;
-        MPI_Bcast(&max_owner, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-        int global_max_pos = (rank == max_owner) ? lpos : 0;
-        MPI_Bcast(&global_max_pos, 1, MPI_INT, max_owner, MPI_COMM_WORLD);
+        MPI_Allreduce(&local_max, &global_max, 1, MPI_FLOAT_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+        int global_max_pos = (rank == global_max.rank) ? lpos : 0;
+        MPI_Bcast(&global_max_pos, 1, MPI_INT, global_max.rank, MPI_COMM_WORLD);
         if (rank == 0)
         {
             maximum[i] = global_max.max;
@@ -154,4 +141,9 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
     }
     //MPI_Gatherv(local_layer, sizes[rank], MPI_FLOAT, layer, sizes, displs, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    free(layer_base);
+    free(layer_copy_base);
+    free(sqrt_distances);
+    free(precalc_energy);
+    free(precalc_positions);
 }
