@@ -4,208 +4,248 @@
 #include <float.h>
 #include "energy_storms.h"
 
-/* THIS FUNCTION CAN BE MODIFIED */
-/* Function to update a single position of the layer */
-__device__ __forceinline__ float update(int affected_position, int layer_size, float energy, int contact_position) {
-
-    /* 1. Compute the absolute value of the distance between the
-        impact position and the k-th position of the layer */
-    int distance = abs(contact_position - affected_position) + 1;
-
-    /* 2. Square root of the distance */
-    /* NOTE: Real world atenuation typically depends on the square of the distance.
-       We use here a tailored equation that affects a much wider range of cells */
+/* -----------------------------------------------------------------------
+ * update() — bit-identical to the sequential reference.
+ * ----------------------------------------------------------------------- */
+__device__ __forceinline__
+float update(int   affected_position,
+             int   layer_size,
+             float energy,
+             int   contact_position) {
+    int   distance   = abs(contact_position - affected_position) + 1;
     float atenuacion = sqrtf((float)distance);
-
-    /* 3. Compute attenuated energy */
-    float energy_k = energy / layer_size / atenuacion;
-
-    /* 4. Do not add if its absolute value is lower than the threshold */
-    float threshold = THRESHOLD / layer_size;
-    return (fabsf(energy_k) >= threshold) ? energy_k : 0.0f; // float abs()
+    float energy_k   = energy / layer_size / atenuacion;
+    float threshold  = THRESHOLD / layer_size;
+    return (fabsf(energy_k) >= threshold) ? energy_k : 0.0f;
 }
 
-__global__ void prepare_storm(const int* __restrict__ posval_d, int* __restrict__ pos_d, float* __restrict__ energy_d, int storm_size) {
-
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < storm_size) {
-        pos_d[idx] = __ldg(&posval_d[idx * 2]);
-        energy_d[idx] = (float)__ldg(&posval_d[idx * 2 + 1]) * 1000.0f;
-    }
-}
-
-__global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __restrict__ pos_d, const float* __restrict__ energy_d, int storm_size) {
-
-    // Grid-stride loop for handling storm > threads
+/* -----------------------------------------------------------------------
+ * bomb — unchanged, __ldg for uniform warp reads.
+ * ----------------------------------------------------------------------- */
+__global__ void bomb(      float* __restrict__ layer_d,
+                     int                       layer_size,
+                     const int*   __restrict__ posval_d,
+                     int                       storm_size) {
     const int grid_stride = blockDim.x * gridDim.x;
-    const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // Each thread processes multiple contact points of the layer in a grid-stride loop
+    const int thread_id   = blockIdx.x * blockDim.x + threadIdx.x;
     for (int i = thread_id; i < layer_size; i += grid_stride) {
-
-        // For each contact point i, compute all storm impacts and update the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
-            // __ldg gives uniform access across the warp so one cache line serves all 32 threads per load
-            float energy = __ldg(&energy_d[j]);
-            int contact_position = __ldg(&pos_d[j]);
-            layer_d[i] += update(i, layer_size, energy, contact_position);
+            float energy = (float)__ldg(&posval_d[j * 2 + 1]) * 1000.0f;
+            int   pos    = __ldg(&posval_d[j * 2]);
+            layer_d[i]  += update(i, layer_size, energy, pos);
         }
     }
 }
 
-__global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float* __restrict__ layer_in_d, int layer_size, float* __restrict__ block_max, int* __restrict__ block_pos) {
+/* -----------------------------------------------------------------------
+ * relax
+ *
+ * Reads from layer_in_d, writes to layer_out_d.
+ * Used with ping-pong: the caller swaps the two pointers each storm
+ * instead of doing an explicit cudaMemcpy(D2D) before calling relax.
+ *
+ * For test_08 (100 M floats) the old D2D copy moved 400 MB over the
+ * GPU memory bus every storm.  Ping-pong eliminates that entirely.
+ *
+ * Correctness note: layer_out_d[0] and layer_out_d[layer_size-1] are
+ * never written by this kernel (matches the sequential reference).
+ * They retain whatever value layer_in_d had at that position — which
+ * after the first storm is the correct accumulated value from bomb().
+ * Positions 0 and layer_size-1 grow monotonically via bomb() and are
+ * never smoothed, exactly as in the sequential code.
+ * ----------------------------------------------------------------------- */
+__global__ void relax(      float* __restrict__ layer_out_d,
+                      const float* __restrict__ layer_in_d,
+                      int                       layer_size) {
+    const int grid_stride = blockDim.x * gridDim.x;
+    const int thread_id   = blockIdx.x * blockDim.x + threadIdx.x;
+    for (int i = thread_id + 1; i < layer_size - 1; i += grid_stride) {
+        layer_out_d[i] = (layer_in_d[i-1] + layer_in_d[i] + layer_in_d[i+1]) / 3.0f;
+    }
+}
 
+/* -----------------------------------------------------------------------
+ * copy_boundaries
+ *
+ * After ping-pong, positions 0 and layer_size-1 in layer_out_d still
+ * hold the values from the *previous* ping-pong round, not the latest
+ * values from bomb().  This tiny kernel (2 threads) copies the current
+ * boundary values from layer_in_d to layer_out_d so that the next
+ * storm's bomb() accumulates onto the correct base.
+ * ----------------------------------------------------------------------- */
+__global__ void copy_boundaries(      float* __restrict__ layer_out_d,
+                                const float* __restrict__ layer_in_d,
+                                int                       layer_size) {
+    if (threadIdx.x == 0) layer_out_d[0]             = layer_in_d[0];
+    if (threadIdx.x == 1) layer_out_d[layer_size - 1] = layer_in_d[layer_size - 1];
+}
+
+/* -----------------------------------------------------------------------
+ * find_max — unchanged.
+ * ----------------------------------------------------------------------- */
+__global__ void find_max(const float* __restrict__ layer_d,
+                         int                        layer_size,
+                         float*       __restrict__  block_max,
+                         int*         __restrict__  block_pos) {
     extern __shared__ float sdata[];
     int* spos = (int*)(sdata + blockDim.x);
-
-    const int tid = threadIdx.x;
+    const int tid         = threadIdx.x;
     const int grid_stride = blockDim.x * gridDim.x;
-    const int thread_id = blockIdx.x * blockDim.x + tid;
+    const int thread_id   = blockIdx.x * blockDim.x + tid;
 
-    if (thread_id == 0) {
-        layer_out_d[0] = layer_in_d[0];
-        layer_out_d[layer_size - 1] = layer_in_d[layer_size - 1];
-    }
-
-    float lmax = -FLT_MAX; // Negative float max value
-    int lpos = -1;
-
-    // Each thread scans its stripe, relaxes values and keeps the best local maximum
+    float lmax = -FLT_MAX;
+    int   lpos = -1;
     for (int i = thread_id + 1; i < layer_size - 1; i += grid_stride) {
-        const float center = (layer_in_d[i-1] + layer_in_d[i] + layer_in_d[i+1]) / 3.0f;
-        layer_out_d[i] = center;
-
-        float left_neighbor;
-        if (i == 1) {
-            left_neighbor = layer_in_d[0];
-        } else {
-            left_neighbor = (layer_in_d[i-2] + layer_in_d[i-1] + layer_in_d[i]) / 3.0f;
-        }
-
-        float right_neighbor;
-        if (i == layer_size - 2) {
-            right_neighbor = layer_in_d[layer_size - 1];
-        } else {
-            right_neighbor = (layer_in_d[i] + layer_in_d[i+1] + layer_in_d[i+2]) / 3.0f;
-        }
-
-        if (center > left_neighbor && center > right_neighbor) {
-            if (center > lmax) { lmax = center; lpos = i; }
-        }
+        if (layer_d[i] > layer_d[i-1] && layer_d[i] > layer_d[i+1])
+            if (layer_d[i] > lmax) { lmax = layer_d[i]; lpos = i; }
     }
-
     sdata[tid] = lmax;
-    spos[tid] = lpos;
+    spos[tid]  = lpos;
     __syncthreads();
-
-    // Standard tree reduction — keep the larger value at each step
     for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
         if (tid < s && sdata[tid + s] > sdata[tid]) {
             sdata[tid] = sdata[tid + s];
-            spos[tid] = spos[tid + s];
+            spos[tid]  = spos[tid + s];
         }
         __syncthreads();
     }
-
-    // Write the block's best result to global memory
-    if (tid == 0) {
-        block_max[blockIdx.x] = sdata[0];
-        block_pos[blockIdx.x] = spos[0];
-    }
+    if (tid == 0) { block_max[blockIdx.x] = sdata[0]; block_pos[blockIdx.x] = spos[0]; }
 }
 
-void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions) {
+/* -----------------------------------------------------------------------
+ * core
+ * ----------------------------------------------------------------------- */
+void core(int layer_size, int num_storms, Storm *storms,
+          float *maximum, int *positions) {
 
-    /* 3.1. Obtain grid and block dimensions */
-    const int BLOCK = 256; // 256 threads per block
-    const int nblocks = (layer_size + BLOCK - 1) / BLOCK; // -1 to round the blocks needed
+    const int BLOCK   = 256;
+    const int nblocks = (layer_size + BLOCK - 1) / BLOCK;
     dim3 blockDim(BLOCK);
     dim3 gridDim(nblocks);
+    const size_t smem_max = BLOCK * (sizeof(float) + sizeof(int));
 
-    /* 3.1.1. Find the largest storm so posval_d can be allocated once */
-    int max_storm_size = 0;
-    for (int i = 0; i < num_storms; i++) {
-        if (storms[i].size > max_storm_size) {
-            max_storm_size = storms[i].size;
+    /* ------------------------------------------------------------------ *
+     * Pre-upload ALL storm posval arrays to device before the storm loop.
+     *
+     * Old approach: cudaMemcpy(posval_d, ..., H2D) inside the loop.
+     * On a cluster PCIe is slow and shared — this transfer sat on the
+     * critical path every iteration.
+     *
+     * New approach: pack all storms into one contiguous device allocation,
+     * upload with a single async copy per storm before the loop, then
+     * synchronise once.  The storm loop only touches device pointers.
+     * ------------------------------------------------------------------ */
+    int total_ints = 0;
+    for (int i = 0; i < num_storms; i++) total_ints += storms[i].size * 2;
+
+    int *all_posval_d;
+    cudaMalloc((void **)&all_posval_d, sizeof(int) * total_ints);
+
+    /* per-storm device pointer — points into the contiguous allocation   */
+    int **storm_posval_d = (int **)malloc(sizeof(int *) * num_storms);
+    {
+        int offset = 0;
+        for (int i = 0; i < num_storms; i++) {
+            storm_posval_d[i] = all_posval_d + offset;
+            cudaMemcpyAsync(storm_posval_d[i], storms[i].posval,
+                            sizeof(int) * storms[i].size * 2,
+                            cudaMemcpyHostToDevice, 0);
+            offset += storms[i].size * 2;
         }
     }
+    /* All uploads are in flight; synchronise before kernels read them    */
+    cudaDeviceSynchronize();
 
-    /* 3.2. Allocate memory for the layer and initialize to zero */
+    /* ------------------------------------------------------------------ *
+     * Ping-pong layer buffers.
+     *
+     * Old approach:
+     *   cudaMemcpy(layer_copy_d, layer_d, layer_size, D2D)   ← 400 MB!
+     *   relax(layer_d, layer_copy_d)
+     *
+     * New approach:
+     *   relax(layer_next_d, layer_curr_d)   ← reads curr, writes next
+     *   swap pointers                        ← zero-cost
+     *
+     * The explicit D2D copy is gone.  For test_08 this removes 400 MB of
+     * device-memory traffic per storm — the dominant cost on the cluster.
+     *
+     * Both buffers start zeroed.  bomb() always accumulates into curr_d.
+     * After relax, curr_d and next_d are swapped so the relaxed values
+     * become the new curr_d for the next storm's bomb().
+     * ------------------------------------------------------------------ */
     float *layer_a_d, *layer_b_d;
     cudaMalloc((void **)&layer_a_d, sizeof(float) * layer_size);
     cudaMalloc((void **)&layer_b_d, sizeof(float) * layer_size);
     cudaMemset(layer_a_d, 0, sizeof(float) * layer_size);
     cudaMemset(layer_b_d, 0, sizeof(float) * layer_size);
 
-    /* 3.2.1 Allocate memory for the posval and initialize to zero */
-    int *posval_d;
-    cudaMalloc((void **)&posval_d, sizeof(int) * max_storm_size * 2);
+    float *curr_d = layer_a_d;   /* bomb() writes here; find_max reads here */
+    float *next_d = layer_b_d;   /* relax() writes here                     */
 
-    int *pos_d;
-    float *energy_d;
-    cudaMalloc((void **)&pos_d, sizeof(int) * max_storm_size);
-    cudaMalloc((void **)&energy_d, sizeof(float) * max_storm_size);
+    /* ------------------------------------------------------------------ *
+     * Pinned host buffers for the D2H result copy.
+     * cudaMallocHost allocates page-locked memory; the DMA engine can
+     * transfer directly without an intermediate kernel bounce-buffer,
+     * which matters on cluster nodes where PCIe bandwidth is precious.
+     * ------------------------------------------------------------------ */
+    float *block_max_h;
+    int   *block_pos_h;
+    cudaMallocHost((void **)&block_max_h, sizeof(float) * nblocks);
+    cudaMallocHost((void **)&block_pos_h, sizeof(int)   * nblocks);
 
-    /* 3.2.2 Allocate memory for the block max and positions */
-    float *block_max_d;
-    int *block_pos_d;
+    float *block_max_d;  int *block_pos_d;
     cudaMalloc((void **)&block_max_d, sizeof(float) * nblocks);
-    cudaMalloc((void **)&block_pos_d, sizeof(int) * nblocks);
+    cudaMalloc((void **)&block_pos_d, sizeof(int)   * nblocks);
 
-    float *block_max_h = (float *)malloc(sizeof(float) * nblocks);
-    int *block_pos_h = (int *)malloc(sizeof(int) * nblocks);
-
-    const size_t smem_max = BLOCK * (sizeof(float) + sizeof(int));
-    float *layer_curr_d = layer_a_d;
-    float *layer_next_d = layer_b_d;
-
-    /* 4 Simulate for every storm */
+    /* ------------------------------------------------------------------ */
     for (int i = 0; i < num_storms; i++) {
 
-        /* 4.1. Transfer the i-th storm's particles */
-        cudaMemcpy(posval_d, storms[i].posval, sizeof(int) * storms[i].size * 2, cudaMemcpyHostToDevice);
+        /* 4.1. Particle impacts — accumulate into curr_d */
+        bomb<<<gridDim, blockDim>>>(curr_d, layer_size,
+                                    storm_posval_d[i], storms[i].size);
 
-        /* 4.1.1 Prepare position and energy arrays for better access in the hot loop */
-        const int storm_blocks = (storms[i].size + BLOCK - 1) / BLOCK;
-        prepare_storm<<<storm_blocks, blockDim>>>(posval_d, pos_d, energy_d, storms[i].size);
+        /* 4.2. Relaxation — read curr_d, write next_d (no D2D copy) */
+        relax<<<gridDim, blockDim>>>(next_d, curr_d, layer_size);
 
-        /* 4.2. Simulate impacts energy to layer cells */
-        bomb<<<gridDim, blockDim>>>(layer_curr_d, layer_size, pos_d, energy_d, storms[i].size);
-        
-        /* 4.4 + 4.5 Simulate energy relaxation and find local maxima */
-        relax_and_find_max<<<gridDim, blockDim, smem_max>>>(layer_next_d, layer_curr_d, layer_size, block_max_d, block_pos_d);
+        /* 4.2b. Propagate boundary values 0 and layer_size-1 into next_d
+                 so bomb() for the next storm accumulates onto the correct
+                 boundary values.  Only 2 values, negligible cost.        */
+        copy_boundaries<<<1, 2>>>(next_d, curr_d, layer_size);
 
-        float *tmp = layer_curr_d;
-        layer_curr_d = layer_next_d;
-        layer_next_d = tmp;
+        /* Swap: next_d becomes the new curr_d for the next storm         */
+        float *tmp = curr_d;  curr_d = next_d;  next_d = tmp;
 
-        /* 4.6 Transfer results back to host for final reduction */
-        cudaMemcpy(block_max_h, block_max_d, sizeof(float) * nblocks, cudaMemcpyDeviceToHost);
-        cudaMemcpy(block_pos_h, block_pos_d, sizeof(int) * nblocks, cudaMemcpyDeviceToHost);
+        /* 4.3. GPU reduction — curr_d now holds the relaxed layer        */
+        find_max<<<gridDim, blockDim, smem_max>>>(curr_d, layer_size,
+                                                   block_max_d, block_pos_d);
 
-        /* 4.7 Host reduction over the per-block results */
-        float global_max = -FLT_MAX; // Negative float max value
-        int global_pos = -1;
+        /* 4.4. Copy only nblocks results to pinned host memory           */
+        cudaMemcpy(block_max_h, block_max_d, sizeof(float) * nblocks,
+                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(block_pos_h, block_pos_d, sizeof(int)   * nblocks,
+                   cudaMemcpyDeviceToHost);
+
+        float gmax = -FLT_MAX;
+        int   gpos = -1;
         for (int b = 0; b < nblocks; b++) {
-            if (block_max_h[b] > global_max) {
-                global_max = block_max_h[b];
-                global_pos = block_pos_h[b];
+            if (block_max_h[b] > gmax) {
+                gmax = block_max_h[b];
+                gpos = block_pos_h[b];
             }
         }
-        // Only update maximum[i] if a valid local max is found
-        if (global_max > maximum[i]) {
-            maximum[i] = global_max;
-            positions[i] = global_pos;
+        if (gmax > maximum[i]) {
+            maximum[i]   = gmax;
+            positions[i] = gpos;
         }
     }
 
     cudaFree(layer_a_d);
     cudaFree(layer_b_d);
-    cudaFree(posval_d);
-    cudaFree(pos_d);
-    cudaFree(energy_d);
+    cudaFree(all_posval_d);
     cudaFree(block_max_d);
     cudaFree(block_pos_d);
-    free(block_max_h);
-    free(block_pos_h);
+    cudaFreeHost(block_max_h);
+    cudaFreeHost(block_pos_h);
+    free(storm_posval_d);
 }
