@@ -14,5 +14,5 @@ MPI_OMP_EXTRA_CFLAGS = -march=native -mtune=native
 
 # Flags for CUDA code
 # Uncomment and add extra flags if you need them
-#CUDA_EXTRA_CFLAGS =
+CUDA_EXTRA_CFLAGS = --ftz=true --fmad=true -Xcompiler "-march=native -O3 -fno-math-errno -fno-trapping-math -ffinite-math-only"
 #CUDA_EXTRA_LIBS =
