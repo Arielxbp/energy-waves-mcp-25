@@ -17,12 +17,19 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int chunk_size = int_chunk_size + (rank < rem ? 1 : 0);
     int start = rank*int_chunk_size + (rank < rem ? rank : rem);
 
-    float *layer_base      = (float *)calloc(chunk_size + 2, sizeof(float));
-    float *layer_copy_base = (float *)calloc(chunk_size + 2, sizeof(float));
+    float *layer_base      = (float *)malloc((chunk_size + 2) * sizeof(float));
+    float *layer_copy_base = (float *)malloc((chunk_size + 2) * sizeof(float));
     if (!layer_base || !layer_copy_base) {
         fprintf(stderr, "Error: Allocating the layer memory\n");
         exit(EXIT_FAILURE);
     }
+
+    #pragma omp parallel for schedule(static)
+    for (k = 0; k < chunk_size + 2; k++) {
+        layer_base[k] = 0.0f;
+        layer_copy_base[k] = 0.0f;
+    }
+
     float *layer      = layer_base + 1;
     float *layer_copy = layer_copy_base + 1;
 
@@ -31,8 +38,8 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         int rank;
     } global_max, local_max;
 
-    float *sqrt_distances = (float *)malloc((size_t)(layer_size+1)*sizeof(float));
-    for (k = 1; k <= layer_size; k++) sqrt_distances[k] = sqrtf((float)k);
+    float *sqrt_distances = (float *)malloc((size_t)(layer_size*2)*sizeof(float));
+    for (k = 1; k <= layer_size; k++) sqrt_distances[k] = 1.0f/sqrtf((float)k);
 
     int max_storm_size = 0;
     for (i = 0; i < num_storms; i++) {
@@ -54,22 +61,20 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         /* For each particle */
         
         for( j=0; j<storms[i].size; j++ ){
-            precalc_energy[j] = ((float)storms[i].posval[j*2+1] * 1000);
+            precalc_energy[j] = ((float)storms[i].posval[j*2+1] * 1000)/layer_size_f;
             precalc_positions[j] = storms[i].posval[j*2]; 
         }
+        
 
-        #pragma omp parallel for schedule(static) private(j)
+        #pragma omp parallel for schedule(dynamic, 128) private(j)
         for (k = 0; k<chunk_size; k++) {
             int global_k = k+start;
             float cell_val = layer[k];
             for (j = 0; j < storms[i].size; j++) {
-                int distance = precalc_positions[j] - global_k;
-                if ( distance < 0 ) distance = - distance;
-                distance = distance + 1;
+                int distance = abs(precalc_positions[j] - k - start) + 1;
 
-                float energy_k = precalc_energy[j] / layer_size / sqrt_distances[distance];
-                float abs_k = fabsf(energy_k);
-                cell_val += (abs_k >= threshold) ? energy_k : 0.0f;
+                float energy_k = precalc_energy[j] * sqrt_distances[distance];
+                cell_val += (fabsf(energy_k) >= threshold) ? energy_k : 0.0f;
             }
             layer[k] = cell_val;
         }
