@@ -45,8 +45,8 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
 
 __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float* __restrict__ layer_in_d, int layer_size, float* __restrict__ block_max, int* __restrict__ block_pos) {
 
-    extern __shared__ float shared_data[];
-    int* shared_pos = (int*)(shared_data + blockDim.x);
+    __shared__ float shared_data[64];
+    __shared__ int   shared_pos[64];
 
     const int tid = threadIdx.x;
     const int thread_id = blockIdx.x * blockDim.x + tid;
@@ -146,7 +146,6 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     float *block_max_h = (float *)malloc(sizeof(float) * nblocks);
     int *block_pos_h = (int *)malloc(sizeof(int) * nblocks);
 
-    const size_t smem_max = BLOCK * (sizeof(float) + sizeof(int));
     float *layer_curr_d = layer_a_d;
     float *layer_next_d = layer_b_d;
 
@@ -164,7 +163,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         bomb<<<gridDim, blockDim>>>(layer_curr_d, layer_size, pos_d, energy_d, storms[i].size);
         
         /* 4.4 + 4.5 Simulate energy relaxation and find local maxima */
-        relax_and_find_max<<<gridDim, blockDim, smem_max>>>(layer_next_d, layer_curr_d, layer_size, block_max_d, block_pos_d);
+        relax_and_find_max<<<gridDim, blockDim>>>(layer_next_d, layer_curr_d, layer_size, block_max_d, block_pos_d);
 
         float *temp = layer_curr_d;
         layer_curr_d = layer_next_d;
