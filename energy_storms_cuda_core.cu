@@ -40,16 +40,26 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
     const int grid_stride = blockDim.x * gridDim.x;
     const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
+    const float threshold = THRESHOLD / (float)layer_size;
+
     // Each thread processes multiple contact points of the layer in a grid-stride loop
     for (int i = thread_id; i < layer_size; i += grid_stride) {
+
+        float temp = layer_d[i]; // Read current value of the layer cell
 
         // For each contact point i, compute all storm impacts and update the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
             // __ldg gives uniform access across the warp so one cache line serves all 32 threads per load
             float energy = __ldg(&energy_d[j]);
             int contact_position = __ldg(&pos_d[j]);
-            layer_d[i] += update(i, layer_size, energy, contact_position);
+            int distance = abs(contact_position - i) + 1;
+            float res = energy / (float)layer_size / sqrtf((float)distance);
+
+            if (fabsf(res) >= threshold) {
+                temp += res;
+            }
         }
+        layer_d[i] = temp; // Write back the updated value
     }
 }
 
@@ -59,8 +69,8 @@ __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float*
     int* spos = (int*)(sdata + blockDim.x);
 
     const int tid = threadIdx.x;
-    const int grid_stride = blockDim.x * gridDim.x;
     const int thread_id = blockIdx.x * blockDim.x + tid;
+    const int grid_stride = blockDim.x * gridDim.x;
 
     if (thread_id == 0) {
         layer_out_d[0] = layer_in_d[0];
@@ -73,6 +83,7 @@ __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float*
     // Each thread scans its stripe, relaxes values and keeps the best local maximum
     for (int i = thread_id + 1; i < layer_size - 1; i += grid_stride) {
         const float center = (layer_in_d[i-1] + layer_in_d[i] + layer_in_d[i+1]) / 3.0f;
+        
         layer_out_d[i] = center;
 
         float left_neighbor;
@@ -117,7 +128,7 @@ __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float*
 void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions) {
 
     /* 3.1. Obtain grid and block dimensions */
-    const int BLOCK = 256; // 256 threads per block
+    const int BLOCK = 64; // 64 threads per block
     const int nblocks = (layer_size + BLOCK - 1) / BLOCK; // -1 to round the blocks needed
     dim3 blockDim(BLOCK);
     dim3 gridDim(nblocks);
