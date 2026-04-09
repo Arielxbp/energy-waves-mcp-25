@@ -66,25 +66,43 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
         
 
-        #pragma omp parallel for schedule(dynamic, 128) private(j)
-        for (k = 0; k<chunk_size; k++) {
-            int global_k = k+start;
-            float cell_val = layer[k];
-            for (j = 0; j < storms[i].size; j++) {
-                int distance = abs(precalc_positions[j] - k - start) + 1;
+        #pragma omp parallel private(j, k)
+        {
+            int threads = omp_get_num_threads();
+            int tid = omp_get_thread_num();
+            int int_tchunk_size = chunk_size / threads;
+            int trem = chunk_size % threads;
+            int tchunk_size = int_tchunk_size + (tid < trem ? 1 : 0);
+            int tstart = tid*int_tchunk_size + (tid < trem ? tid : trem);
+            int global_start = start + tstart; 
 
-                float energy_k = precalc_energy[j] * sqrt_distances[distance];
-                cell_val += (fabsf(energy_k) >= threshold) ? energy_k : 0.0f;
+            float cell_vals[tchunk_size];
+            for (k = 0; k < tchunk_size; k++) {
+                cell_vals[k] = layer[tstart + k];
             }
-            layer[k] = cell_val;
+
+            
+            for (j = 0; j < storms[i].size; j++) {
+                for (k = 0; k<tchunk_size; k++){
+                    int distance = abs(precalc_positions[j] - k - global_start) + 1;
+
+                    float energy_k = precalc_energy[j] * sqrt_distances[distance];
+                    cell_vals[k] += (fabsf(energy_k) >= threshold) ? energy_k : 0.0f;
+                }
+            }
+
+            for (k = 0; k < tchunk_size; k++) {
+                layer[tstart + k] = cell_vals[k];
+            }
+
         }
-        /*
-        printf("Rank %d: Storm %d layer after impacts:\n", rank, i);
+        
+        /*printf("Rank %d: Storm %d layer after impacts:\n", rank, i);
         printf("[");
         for (int i = 0; i < chunk_size-1; i++) {
-            printf("%f,", local_layer[i]);
+            printf("%f,", layer[i]);
         }
-        printf("%f]\n", local_layer[chunk_size-1]);
+        printf("%f]\n", layer[chunk_size-1]);
         */
         /* 4.2. Energy relaxation between storms */
 
