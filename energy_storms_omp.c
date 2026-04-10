@@ -48,7 +48,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
         
         /*bombardment phase: inlining of update function + inner loop parallelization*/
-        #pragma omp parallel for schedule(static) private(j, k) collapse(2)
+        #pragma omp parallel for schedule(static) private(j, k)
         for (k = 0; k<layer_size; k++) {
             for (j = 0; j < storms[i].size; j++){
                 int distance = abs(precalc_positions[j] - k) + 1;
