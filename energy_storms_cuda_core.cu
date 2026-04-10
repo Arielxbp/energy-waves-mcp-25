@@ -4,26 +4,7 @@
 #include <float.h>
 #include "energy_storms.h"
 
-/* THIS FUNCTION CAN BE MODIFIED */
-/* Function to update a single position of the layer */
-__device__ __forceinline__ float update(int affected_position, int layer_size, float energy, int contact_position) {
-
-    /* 1. Compute the absolute value of the distance between the
-        impact position and the k-th position of the layer */
-    int distance = abs(contact_position - affected_position) + 1;
-
-    /* 2. Square root of the distance */
-    /* NOTE: Real world atenuation typically depends on the square of the distance.
-       We use here a tailored equation that affects a much wider range of cells */
-    float atenuacion = sqrtf((float)distance);
-
-    /* 3. Compute attenuated energy */
-    float energy_k = energy / layer_size / atenuacion;
-
-    /* 4. Do not add if its absolute value is lower than the threshold */
-    float threshold = THRESHOLD / layer_size;
-    return (fabsf(energy_k) >= threshold) ? energy_k : 0.0f; // float abs()
-}
+#define BLOCK 64
 
 __global__ void prepare_storm(const int* __restrict__ posval_d, int* __restrict__ pos_d, float* __restrict__ energy_d, int storm_size) {
 
@@ -65,8 +46,8 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
 
 __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float* __restrict__ layer_in_d, int layer_size, float* __restrict__ block_max, int* __restrict__ block_pos) {
 
-    extern __shared__ float sdata[];
-    int* spos = (int*)(sdata + blockDim.x);
+    __shared__ float shared_data[BLOCK];
+    __shared__ int   shared_pos[BLOCK];
 
     const int tid = threadIdx.x;
     const int thread_id = blockIdx.x * blockDim.x + tid;
@@ -77,8 +58,8 @@ __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float*
         layer_out_d[layer_size - 1] = layer_in_d[layer_size - 1];
     }
 
-    float lmax = -FLT_MAX; // Negative float max value
-    int lpos = -1;
+    float local_max = -FLT_MAX; // Negative float max value
+    int local_pos = -1;
 
     // Each thread scans its stripe, relaxes values and keeps the best local maximum
     for (int i = thread_id + 1; i < layer_size - 1; i += grid_stride) {
@@ -101,34 +82,34 @@ __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float*
         }
 
         if (center > left_neighbor && center > right_neighbor) {
-            if (center > lmax) { lmax = center; lpos = i; }
+            if (center > local_max) { local_max = center; local_pos = i; }
         }
     }
 
-    sdata[tid] = lmax;
-    spos[tid] = lpos;
+    shared_data[tid] = local_max;
+    shared_pos[tid] = local_pos;
     __syncthreads();
 
-    // Standard tree reduction — keep the larger value at each step
+    // Tree reduction which keeps the larger value at each step
     for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
-        if (tid < s && sdata[tid + s] > sdata[tid]) {
-            sdata[tid] = sdata[tid + s];
-            spos[tid] = spos[tid + s];
+        if (tid < s && shared_data[tid + s] > shared_data[tid]) {
+            shared_data[tid] = shared_data[tid + s];
+            shared_pos[tid] = shared_pos[tid + s];
         }
         __syncthreads();
     }
 
     // Write the block's best result to global memory
     if (tid == 0) {
-        block_max[blockIdx.x] = sdata[0];
-        block_pos[blockIdx.x] = spos[0];
+        block_max[blockIdx.x] = shared_data[0];
+        block_pos[blockIdx.x] = shared_pos[0];
     }
 }
 
 void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions) {
 
     /* 3.1. Obtain grid and block dimensions */
-    const int BLOCK = 64; // 64 threads per block
+    
     const int nblocks = (layer_size + BLOCK - 1) / BLOCK; // -1 to round the blocks needed
     dim3 blockDim(BLOCK);
     dim3 gridDim(nblocks);
@@ -166,7 +147,6 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     float *block_max_h = (float *)malloc(sizeof(float) * nblocks);
     int *block_pos_h = (int *)malloc(sizeof(int) * nblocks);
 
-    const size_t smem_max = BLOCK * (sizeof(float) + sizeof(int));
     float *layer_curr_d = layer_a_d;
     float *layer_next_d = layer_b_d;
 
@@ -184,11 +164,11 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         bomb<<<gridDim, blockDim>>>(layer_curr_d, layer_size, pos_d, energy_d, storms[i].size);
         
         /* 4.4 + 4.5 Simulate energy relaxation and find local maxima */
-        relax_and_find_max<<<gridDim, blockDim, smem_max>>>(layer_next_d, layer_curr_d, layer_size, block_max_d, block_pos_d);
+        relax_and_find_max<<<gridDim, blockDim>>>(layer_next_d, layer_curr_d, layer_size, block_max_d, block_pos_d);
 
-        float *tmp = layer_curr_d;
+        float *temp = layer_curr_d;
         layer_curr_d = layer_next_d;
-        layer_next_d = tmp;
+        layer_next_d = temp;
 
         /* 4.6 Transfer results back to host for final reduction */
         cudaMemcpy(block_max_h, block_max_d, sizeof(float) * nblocks, cudaMemcpyDeviceToHost);
