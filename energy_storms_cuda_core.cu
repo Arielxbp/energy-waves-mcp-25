@@ -4,6 +4,7 @@
 #include <float.h>
 #include "energy_storms.h"
 
+#define BLOCK 64
 
 __global__ void prepare_storm(const int* __restrict__ posval_d, int* __restrict__ pos_d, float* __restrict__ energy_d, int storm_size) {
 
@@ -45,8 +46,8 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
 
 __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float* __restrict__ layer_in_d, int layer_size, float* __restrict__ block_max, int* __restrict__ block_pos) {
 
-    __shared__ float shared_data[64];
-    __shared__ int   shared_pos[64];
+    __shared__ float shared_data[BLOCK];
+    __shared__ int   shared_pos[BLOCK];
 
     const int tid = threadIdx.x;
     const int thread_id = blockIdx.x * blockDim.x + tid;
@@ -108,7 +109,7 @@ __global__ void relax_and_find_max(float* __restrict__ layer_out_d, const float*
 void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *positions) {
 
     /* 3.1. Obtain grid and block dimensions */
-    const int BLOCK = 64; // 64 threads per block
+    
     const int nblocks = (layer_size + BLOCK - 1) / BLOCK; // -1 to round the blocks needed
     dim3 blockDim(BLOCK);
     dim3 gridDim(nblocks);
