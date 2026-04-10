@@ -25,7 +25,6 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         exit(EXIT_FAILURE);
     }
 
-    #pragma omp parallel for schedule(static)
     for (k = 0; k < chunk_size+2; k++) {
         layer_base[k] = 0.0f;
         layer_copy_base[k] = 0.0f;
@@ -40,7 +39,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     } global_max, local_max;
 
     /*precalculation of distances square roots*/
-    float *sqrt_distances = (float *)malloc((size_t)(layer_size*5)*sizeof(float));
+    float *sqrt_distances = (float *)malloc((size_t)(layer_size*2)*sizeof(float));
     for (k = 1; k <= layer_size; k++) sqrt_distances[k] = sqrtf((float)k);
 
     int max_storm_size = 0;
@@ -59,43 +58,24 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     //MPI_Scatterv(layer, sizes, displs, MPI_FLOAT, local_layer, sizes[rank], MPI_FLOAT, 0, MPI_COMM_WORLD);
     /*storms simulation*/
     for( i=0; i<num_storms; i++) {
-        
+
         /*precalculation of energies and positions of particles*/
         for( j=0; j<storms[i].size; j++ ){
             precalc_energy[j] = ((float)storms[i].posval[j*2+1] * 1000)/layer_size_f;
             precalc_positions[j] = storms[i].posval[j*2]; 
         }
-        
-        /*further redistribution of layer between threads*/
-        #pragma omp parallel private(j, k)
-        {
-            int threads = omp_get_num_threads();
-            int tid = omp_get_thread_num();
-            int int_tchunk_size = chunk_size / threads;
-            int trem = chunk_size % threads;
-            int tchunk_size = int_tchunk_size + (tid < trem ? 1 : 0);
-            int tstart = tid*int_tchunk_size + (tid < trem ? tid : trem);
-            int global_start = start + tstart; 
 
-            /*private copy of local layer for each thread for cache efficiency*/
-            float cell_vals[tchunk_size];
-            for (k = 0; k < tchunk_size; k++) {
-                cell_vals[k] = layer[tstart + k];
-            }
-
-            /*bombardment phase: inlining of update function*/
+        /*bombardment phase: inlining of update function*/
+        for (k = 0; k<chunk_size; k++) {
+            int global_k = k+start;
+            float cell_val = layer[k];
             for (j = 0; j < storms[i].size; j++) {
-                for (k = 0; k<tchunk_size; k++){
-                    int distance = abs(precalc_positions[j] - k - global_start) + 1;
-                    float energy_k = precalc_energy[j] / sqrt_distances[distance];
-                    cell_vals[k] += (fabsf(energy_k) >= threshold) ? energy_k : 0.0f;
-                }
-            }
+                int distance = abs(precalc_positions[j] - k - start) + 1;
 
-            for (k = 0; k < tchunk_size; k++) {
-                layer[tstart + k] = cell_vals[k];
+                float energy_k = precalc_energy[j] / sqrt_distances[distance];
+                cell_val += (fabsf(energy_k) >= threshold) ? energy_k : 0.0f;
             }
-
+            layer[k] = cell_val;
         }
         
         /*printf("[");
@@ -104,23 +84,21 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         }
         printf("%f]\n", layer[chunk_size-1]);
         */
-        
+
         /*border cell exchange*/
-        int left = (rank > 0) ? rank-1 : MPI_PROC_NULL;
+        int left  = (rank > 0) ? rank-1 : MPI_PROC_NULL;
         int right = (rank < size - 1) ? rank+1 : MPI_PROC_NULL;
         MPI_Sendrecv(&layer[chunk_size-1], 1, MPI_FLOAT, right, 0, &layer[-1], 1, MPI_FLOAT, left,  0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         MPI_Sendrecv(&layer[0],1, MPI_FLOAT, left, 1, &layer[chunk_size], 1, MPI_FLOAT, right, 1,MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
 
         /*relaxation phase*/
-        #pragma omp parallel for schedule(static) private(k)
         for (k = 0; k < chunk_size; k++)
             layer_copy[k] = layer[k];
 
-        #pragma omp parallel for schedule(static) private(k)
         for (k = 0; k < chunk_size; k++) {
             int gk = k + start;
-            if (gk > 0 && gk < layer_size - 1)   
+            if (gk > 0 && gk < layer_size - 1)  
                 layer[k] = (layer_copy[k-1] + layer_copy[k] + layer_copy[k+1]) / 3.0f;
         }
 
