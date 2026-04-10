@@ -5,18 +5,18 @@
 int main() {
     std::ofstream file("test_file.txt");
 
-    const int N = 1000000;  // change size here
+    const int N = 1000000;  // 1k, 10k, 100k, 500k, 1m 
     int position = 0;
 
     std::mt19937 rng(42);
-    std::uniform_int_distribution<int> energy_dist(1, 1000);
-    std::uniform_int_distribution<int> step_dist(1, 5);
+    std::uniform_int_distribution<int> energy_dist(1, 1000000);
+    std::uniform_int_distribution<int> step_dist(1, 1000000);
 
     // Write the number of particles as the first line (required by the storm file format)
     file << N << std::endl;
 
     for (int i = 0; i < N; ++i) {
-        position += step_dist(rng);
+        position = step_dist(rng);
         int energy = energy_dist(rng);
         file << position << " " << energy << "\n";
     }

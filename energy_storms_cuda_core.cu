@@ -10,8 +10,8 @@ __global__ void prepare_storm(const int* __restrict__ posval_d, int* __restrict_
 
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < storm_size) {
-        pos_d[idx] = __ldg(&posval_d[idx * 2]);
-        energy_d[idx] = (float)__ldg(&posval_d[idx * 2 + 1]) * 1000.0f;
+        pos_d[idx] = posval_d[idx * 2];
+        energy_d[idx] = (float)posval_d[idx * 2 + 1] * 1000.0f;
     }
 }
 
@@ -31,8 +31,8 @@ __global__ void bomb(float* __restrict__ layer_d, int layer_size, const int* __r
         // For each contact point i, compute all storm impacts and update the contact point value if affected by it
         for (int j = 0; j < storm_size; j++) {
             // __ldg gives uniform access across the warp so one cache line serves all 32 threads per load
-            float energy = __ldg(&energy_d[j]);
-            int contact_position = __ldg(&pos_d[j]);
+            const float energy = energy_d[j];
+            const int contact_position = pos_d[j];
             int distance = abs(contact_position - i) + 1;
             float res = energy / (float)layer_size / sqrtf((float)distance);
 
