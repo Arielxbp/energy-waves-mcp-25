@@ -28,7 +28,7 @@ FLAGS=-O3
 LIBS=-lm
 
 # Targets to build --- energy_storms_cuda_bench is an addon for benchmarking
-OBJS=energy_storms_seq energy_storms_mpi_omp energy_storms_cuda energy_storms_core.o energy_storms_mpi_omp_core.o energy_storms_cuda_core.o energy_storms_cuda_bench
+OBJS=energy_storms_seq energy_storms_mpi_omp energy_storms_cuda energy_storms_core.o energy_storms_mpi_omp_core.o energy_storms_cuda_core.o energy_storms_cuda_bench energy_storms_mpi_core.o energy_storms_mpi energy_storms_omp
 
 all: $(OBJS)
 
@@ -53,11 +53,20 @@ energy_storms_core.o: energy_storms_core.c energy_storms.h
 energy_storms_seq: energy_storms_seq.c energy_storms.h energy_storms_core.o
 		$(CC) $(FLAGS) $(DEBUG) $< energy_storms_core.o $(LIBS) -o $@
 
+energy_storms_omp: energy_storms_omp.c energy_storms.h
+		$(CC) $(FLAGS) $(DEBUG) $(OMPFLAG) $< $(LIBS) -o $@
+
 energy_storms_mpi_omp_core.o: energy_storms_mpi_omp_core.c energy_storms.h
 		$(MPICC) $(FLAGS) $(DEBUG) $(OMPFLAG) $(MPI_OMP_EXTRA_CFLAGS) -c $< $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
 
 energy_storms_mpi_omp: energy_storms_mpi_omp.c energy_storms.h energy_storms_mpi_omp_core.o
 		$(MPICC) $(FLAGS) $(DEBUG) $(OMPFLAG) $(MPI_OMP_EXTRA_CFLAGS) $< energy_storms_mpi_omp_core.o $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
+
+energy_storms_mpi_core.o: energy_storms_mpi_core.c energy_storms.h
+		$(MPICC) $(FLAGS) $(DEBUG) $(MPI_OMP_EXTRA_CFLAGS) -c $< $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
+
+energy_storms_mpi: energy_storms_mpi_omp.c energy_storms.h energy_storms_mpi_core.o
+		$(MPICC) $(FLAGS) $(DEBUG) $(MPI_OMP_EXTRA_CFLAGS) $< energy_storms_mpi_core.o $(LIBS) $(MPI_OMP_EXTRA_LIBS) -o $@
 	
 energy_storms_cuda_core.o: energy_storms_cuda_core.cu energy_storms.h
 		$(CUDACC) $(DEBUG) $(FLAGS) $(CUDA_EXTRA_CFLAGS) -c $< $(LIBS) $(CUDA_EXTRA_LIBS) -o $@
@@ -94,6 +103,9 @@ debug:
 
 run_mpi:
 		mpirun $(MPIRUN_FLAGS) ./energy_storms_mpi_omp 20000 test_files/test_02_a30k_p20k_w1 test_files/test_02_a30k_p20k_w2 test_files/test_02_a30k_p20k_w3 test_files/test_02_a30k_p20k_w4 test_files/test_02_a30k_p20k_w5 test_files/test_02_a30k_p20k_w6
+
+run_mpi_only:
+		mpirun $(MPIRUN_FLAGS) ./energy_storms_mpi 20000 test_files/test_02_a30k_p20k_w1 test_files/test_02_a30k_p20k_w2 test_files/test_02_a30k_p20k_w3 test_files/test_02_a30k_p20k_w4 test_files/test_02_a30k_p20k_w5 test_files/test_02_a30k_p20k_w6
 
 run_cuda:
 		srun -N 1 -n 1 ./energy_storms_cuda 20000 test_files/test_02_a30k_p20k_w1 test_files/test_02_a30k_p20k_w2 test_files/test_02_a30k_p20k_w3 test_files/test_02_a30k_p20k_w4 test_files/test_02_a30k_p20k_w5 test_files/test_02_a30k_p20k_w6
