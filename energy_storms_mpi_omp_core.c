@@ -17,7 +17,7 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
     int chunk_size = int_chunk_size + (rank < rem ? 1 : 0);
     int start = rank*int_chunk_size + (rank < rem ? rank : rem);
 
-    /*local layer allocation with border cells*/
+    /*local layer allocation with ghost cells*/
     float *layer_base = (float *)malloc((chunk_size+2)*sizeof(float));
     float *layer_copy_base = (float *)malloc((chunk_size+2)*sizeof(float));
     if (!layer_base || !layer_copy_base) {
@@ -39,8 +39,12 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
         int rank;
     } global_max, local_max;
 
-    /*precalculation of distances square roots*/
+    /*precalculation of distances square roots.*/
     float *sqrt_distances = (float *)malloc((size_t)(layer_size*5)*sizeof(float));
+    if (!sqrt_distances) {
+        fprintf(stderr, "Error: Allocating the sqrt_distances memory\n");
+        exit(EXIT_FAILURE);
+    }
     for (k = 1; k <= layer_size; k++) sqrt_distances[k] = sqrtf((float)k);
 
     int max_storm_size = 0;
@@ -52,6 +56,10 @@ void core(int layer_size, int num_storms, Storm *storms, float *maximum, int *po
 
     float *precalc_energy = (float *)malloc(max_storm_size*sizeof(float));
     int *precalc_positions = (int*)malloc(max_storm_size*sizeof(int));
+    if (!precalc_energy || !precalc_positions) {
+        fprintf(stderr, "Error: Allocating the precalculation memory\n");
+        exit(EXIT_FAILURE);
+    }
 
     float layer_size_f = (float) layer_size;
     float threshold = THRESHOLD/layer_size_f;
